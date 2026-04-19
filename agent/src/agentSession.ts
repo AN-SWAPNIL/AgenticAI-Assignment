@@ -8,6 +8,10 @@ export interface AgentSessionOptions {
   workspace: Workspace;
   modelId: string;
   apiKey: string;
+  tavilyApiKey?: string;
+  onQueueFileExport?: (args: { path: string; displayName?: string }) => Promise<{
+    sessionFileId: string;
+  }>;
   thinkingLevel?: "off" | "low" | "medium" | "high";
 }
 
@@ -17,7 +21,11 @@ export interface AgentSessionOptions {
  */
 export function createAgentSession(opts: AgentSessionOptions) {
   const model = resolveModel(opts.modelId);
-  const tools = createTools(opts.workspace);
+  const tools = createTools({
+    workspace: opts.workspace,
+    tavilyApiKey: opts.tavilyApiKey,
+    onQueueFileExport: opts.onQueueFileExport,
+  });
 
   const agent = new Agent({
     initialState: {
@@ -48,4 +56,3 @@ function resolveModel(id: string) {
   }
   throw new Error("No Google Gemini model available in @mariozechner/pi-ai");
 }
-

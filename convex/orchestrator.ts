@@ -120,6 +120,7 @@ async function bootstrapDaemon(
     conversationId: string;
     agentToken: string;
     geminiApiKey: string;
+    tavilyApiKey?: string;
   },
 ): Promise<void> {
   await sandbox.fs.createFolder(RUNTIME_DIR, "755").catch(() => undefined);
@@ -146,6 +147,9 @@ async function bootstrapDaemon(
     `export CONVEX_CONVERSATION_ID=${shellQuote(env.conversationId)}`,
     `export CONVEX_AGENT_TOKEN=${shellQuote(env.agentToken)}`,
     `export GEMINI_API_KEY=${shellQuote(env.geminiApiKey)}`,
+    ...(env.tavilyApiKey
+      ? [`export TAVILY_API_KEY=${shellQuote(env.tavilyApiKey)}`]
+      : []),
     `export AGENT_WORKSPACE_DIR=${shellQuote(WORKSPACE_DIR)}`,
     `export AGENT_MODEL_ID=${shellQuote("gemini-2.5-flash")}`,
   ].join("\n");
@@ -188,6 +192,7 @@ export const provisionConversation = action({
 
     const convexUrl = requiredEnv("CONVEX_CLOUD_URL");
     const geminiApiKey = requiredEnv("GEMINI_API_KEY");
+    const tavilyApiKey = process.env.TAVILY_API_KEY?.trim() || undefined;
 
     try {
       const daytona = createDaytona();
@@ -210,6 +215,7 @@ export const provisionConversation = action({
         conversationId: String(conversationId),
         agentToken: conversation.agentToken,
         geminiApiKey,
+        tavilyApiKey,
       });
 
       await ctx.runMutation(internal.conversations.patchForOrchestrator, {
@@ -259,6 +265,7 @@ export const reviveDaemonIfDead = action({
 
     const convexUrl = requiredEnv("CONVEX_CLOUD_URL");
     const geminiApiKey = requiredEnv("GEMINI_API_KEY");
+    const tavilyApiKey = process.env.TAVILY_API_KEY?.trim() || undefined;
 
     try {
       const daytona = createDaytona();
@@ -275,6 +282,7 @@ export const reviveDaemonIfDead = action({
         conversationId: String(conversationId),
         agentToken: conversation.agentToken,
         geminiApiKey,
+        tavilyApiKey,
       });
 
       await ctx.runMutation(internal.conversations.patchForOrchestrator, {

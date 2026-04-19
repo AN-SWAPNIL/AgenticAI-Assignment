@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { ActiveRunData } from "../../hooks/useActiveRun";
 import { formatDuration, formatRelative } from "../../lib/formatters";
 import { RawEventsDrawer } from "./RawEventsDrawer";
+import { SessionFilesTable } from "./SessionFilesTable";
 import { TimelineView } from "./TimelineView";
 import { ToolHistoryTable } from "./ToolHistoryTable";
 import { ToolStatsCards } from "./ToolStatsCards";
@@ -11,11 +12,12 @@ interface ObservabilityPanelProps {
   active: ActiveRunData;
 }
 
-type Tab = "timeline" | "tools" | "stats" | "raw";
+type Tab = "timeline" | "tools" | "files" | "stats" | "raw";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "timeline", label: "Timeline" },
   { id: "tools", label: "Tools" },
+  { id: "files", label: "Files" },
   { id: "stats", label: "Stats" },
   { id: "raw", label: "Raw" },
 ];
@@ -26,6 +28,7 @@ export function ObservabilityPanel({ active }: ObservabilityPanelProps) {
   const run = active.observabilityRun;
   const tools = active.toolExecutions ?? [];
   const events = active.timelineEvents ?? [];
+  const files = active.sessionFiles ?? [];
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -57,6 +60,7 @@ export function ObservabilityPanel({ active }: ObservabilityPanelProps) {
       <div className="min-h-0 flex-1 overflow-y-auto">
         {tab === "timeline" && <TimelineView events={events} run={run} />}
         {tab === "tools" && <ToolHistoryTable executions={tools} />}
+        {tab === "files" && <SessionFilesTable files={files} />}
         {tab === "stats" && <ToolStatsCards executions={tools} />}
         {tab === "raw" && <RawEventsDrawer events={events} />}
       </div>
@@ -99,4 +103,3 @@ function RunSummary({
     </p>
   );
 }
-

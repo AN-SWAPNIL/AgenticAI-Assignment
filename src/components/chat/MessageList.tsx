@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef } from "react";
-import type { Message, ToolExecution } from "../../types";
+import type { Message, SessionFileView, ToolExecution } from "../../types";
 import { MessageBubble } from "./MessageBubble";
 
 interface MessageListProps {
   messages: Message[];
   toolExecutions: ToolExecution[];
+  sessionFiles: SessionFileView[];
 }
 
-export function MessageList({ messages, toolExecutions }: MessageListProps) {
+export function MessageList({ messages, toolExecutions, sessionFiles }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Group tool executions by their assistant message via runId. Convex provides the runId
@@ -24,6 +25,20 @@ export function MessageList({ messages, toolExecutions }: MessageListProps) {
     }
     return byRun;
   }, [toolExecutions]);
+
+  const filesByMessage = useMemo(() => {
+    const byRun = new Map<string, SessionFileView[]>();
+    for (const file of sessionFiles) {
+      if (!file.runId || file.direction !== "download") continue;
+      const list = byRun.get(file.runId) ?? [];
+      list.push(file);
+      byRun.set(file.runId, list);
+    }
+    for (const list of byRun.values()) {
+      list.sort((a, b) => a.createdAt - b.createdAt);
+    }
+    return byRun;
+  }, [sessionFiles]);
 
   // Auto-scroll to bottom on new content. We track length AND last assistant content length
   // so streaming triggers re-scroll, not just new messages.
@@ -52,6 +67,11 @@ export function MessageList({ messages, toolExecutions }: MessageListProps) {
               toolExecutions={
                 m.role === "assistant" && m.runId
                   ? toolsByMessage.get(m.runId) ?? []
+                  : []
+              }
+              fileArtifacts={
+                m.role === "assistant" && m.runId
+                  ? filesByMessage.get(m.runId) ?? []
                   : []
               }
             />

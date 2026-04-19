@@ -22,6 +22,13 @@ export function formatDuration(ms: number | undefined | null): string {
   return `${minutes}m ${seconds}s`;
 }
 
+export function formatBytes(bytes: number | undefined | null): string {
+  if (bytes === undefined || bytes === null || Number.isNaN(bytes)) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 export function offsetFromStart(at: number, runStart: number | undefined): string {
   if (!runStart) return "+0.00s";
   const delta = Math.max(0, at - runStart) / 1000;

@@ -7,15 +7,50 @@ const WebsearchParams = Type.Object({
 });
 
 type WebsearchInput = { query: string; limit?: number };
-
 type SearchResult = { title: string; url: string; snippet: string };
 
-/**
- * Lightweight DuckDuckGo HTML scraper — no API key, no rate limit auth. We parse the
- * top results with regex rather than pulling in cheerio, to keep the daemon bundle lean.
- * If DDG rate-limits or changes markup, fall back to a Wikipedia OpenSearch result so the
- * agent always gets *something* actionable.
- */
+interface WebsearchOptions {
+  tavilyApiKey?: string;
+}
+
+async function searchTavily(
+  apiKey: string,
+  query: string,
+  limit: number,
+): Promise<SearchResult[]> {
+  const response = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      query,
+      max_results: limit,
+      search_depth: "basic",
+      include_answer: false,
+      include_raw_content: false,
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Tavily returned status ${response.status}: ${body.slice(0, 400)}`);
+  }
+
+  const json = (await response.json()) as {
+    results?: Array<{ title?: string; url?: string; content?: string }>;
+  };
+  const results = Array.isArray(json.results) ? json.results : [];
+  return results
+    .map((item) => ({
+      title: String(item.title ?? "").trim(),
+      url: String(item.url ?? "").trim(),
+      snippet: String(item.content ?? "").trim(),
+    }))
+    .filter((item) => item.title && item.url)
+    .slice(0, limit);
+}
+
 async function searchDuckDuckGo(query: string, limit: number): Promise<SearchResult[]> {
   const res = await fetch("https://html.duckduckgo.com/html/", {
     method: "POST",
@@ -34,7 +69,6 @@ async function searchDuckDuckGo(query: string, limit: number): Promise<SearchRes
   let m: RegExpExecArray | null;
   while ((m = resultRe.exec(html)) !== null) {
     const rawUrl = m[1] ?? "";
-    // DDG wraps links in /l/?uddg=<encoded>&…
     const uddgMatch = /uddg=([^&"]+)/.exec(rawUrl);
     const url = uddgMatch ? decodeURIComponent(uddgMatch[1] ?? "") : rawUrl;
     const title = stripTags(m[2] ?? "").trim();
@@ -82,12 +116,12 @@ function stripTags(html: string): string {
     .replace(/&#39;/g, "'");
 }
 
-export function createWebsearchTool() {
+export function createWebsearchTool(options?: WebsearchOptions) {
   return {
     name: "websearch",
     label: "websearch",
     description:
-      "Search the web and return the top result titles, URLs, and snippets. Use `webfetch` afterward to read a specific result in depth.",
+      "Search the web and return top result titles, URLs, and snippets. Uses Tavily first when configured, then falls back to public search providers.",
     parameters: WebsearchParams,
     async execute(_id: string, params: WebsearchInput) {
       const query = params.query.trim();
@@ -97,12 +131,29 @@ export function createWebsearchTool() {
         10,
       );
 
+      let provider = "tavily";
       let results: SearchResult[] = [];
-      let provider = "duckduckgo";
-      try {
-        results = await searchDuckDuckGo(query, limit);
-      } catch {
-        // fall through to Wikipedia
+      let fallbackReason: string | undefined;
+
+      if (options?.tavilyApiKey) {
+        try {
+          results = await searchTavily(options.tavilyApiKey, query, limit);
+        } catch (error) {
+          fallbackReason = error instanceof Error ? error.message : String(error);
+        }
+      } else {
+        fallbackReason = "TAVILY_API_KEY not configured";
+      }
+
+      if (results.length === 0) {
+        provider = "duckduckgo";
+        try {
+          results = await searchDuckDuckGo(query, limit);
+        } catch (error) {
+          fallbackReason =
+            fallbackReason ??
+            (error instanceof Error ? error.message : String(error));
+        }
       }
 
       if (results.length === 0) {
@@ -125,6 +176,7 @@ export function createWebsearchTool() {
           query,
           provider,
           count: results.length,
+          fallbackReason,
         },
       };
     },

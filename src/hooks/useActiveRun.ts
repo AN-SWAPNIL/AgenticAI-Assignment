@@ -4,6 +4,7 @@ import type {
   ConversationId,
   Message,
   Run,
+  SessionFileView,
   TimelineEvent,
   ToolExecution,
 } from "../types";
@@ -16,6 +17,7 @@ export interface ActiveRunData {
   toolExecutions: ToolExecution[] | undefined;
   conversationToolExecutions: ToolExecution[] | undefined;
   timelineEvents: TimelineEvent[] | undefined;
+  sessionFiles: SessionFileView[] | undefined;
 }
 
 /**
@@ -51,6 +53,10 @@ export function useActiveRun(conversationId: ConversationId | null): ActiveRunDa
     api.conversations.timelineEvents,
     observabilityRun ? { runId: observabilityRun._id } : "skip",
   );
+  const sessionFiles = useQuery(
+    api.files.listForConversation,
+    conversationId ? { conversationId } : "skip",
+  );
 
   return {
     conversation,
@@ -60,5 +66,6 @@ export function useActiveRun(conversationId: ConversationId | null): ActiveRunDa
     toolExecutions,
     conversationToolExecutions,
     timelineEvents,
+    sessionFiles,
   };
 }

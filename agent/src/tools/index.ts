@@ -4,19 +4,44 @@ import { createEditTool } from "./edit.js";
 import { createGlobTool } from "./glob.js";
 import { createGrepTool } from "./grep.js";
 import { createReadTool } from "./read.js";
+import { createShareFileTool } from "./shareFile.js";
 import { createWebfetchTool } from "./webfetch.js";
 import { createWebsearchTool } from "./websearch.js";
 import { createWriteTool } from "./write.js";
 
-export function createTools(workspace: Workspace) {
-  return [
-    createBashTool(workspace),
-    createReadTool(workspace),
-    createWriteTool(workspace),
-    createEditTool(workspace),
-    createGrepTool(workspace),
-    createGlobTool(workspace),
+export interface ToolRuntimeOptions {
+  workspace: Workspace;
+  tavilyApiKey?: string;
+  onQueueFileExport?: (args: { path: string; displayName?: string }) => Promise<{
+    sessionFileId: string;
+  }>;
+}
+
+export function createTools(opts: ToolRuntimeOptions) {
+  const tools: Array<{
+    name: string;
+    label: string;
+    description: string;
+    parameters: unknown;
+    execute: (id: string, params: any) => Promise<any>;
+  }> = [
+    createBashTool(opts.workspace),
+    createReadTool(opts.workspace),
+    createWriteTool(opts.workspace),
+    createEditTool(opts.workspace),
+    createGrepTool(opts.workspace),
+    createGlobTool(opts.workspace),
     createWebfetchTool(),
-    createWebsearchTool(),
+    createWebsearchTool({ tavilyApiKey: opts.tavilyApiKey }),
   ];
+
+  if (opts.onQueueFileExport) {
+    tools.push(
+      createShareFileTool(opts.workspace, {
+        queueExport: opts.onQueueFileExport,
+      }),
+    );
+  }
+
+  return tools;
 }

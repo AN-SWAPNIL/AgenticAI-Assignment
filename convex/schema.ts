@@ -16,6 +16,10 @@ export default defineSchema({
    */
   conversations: defineTable({
     title: v.string(),
+    // Optional for backward compatibility with pre-migration rows.
+    titleMode: v.optional(
+      v.union(v.literal("default"), v.literal("auto"), v.literal("manual")),
+    ),
     status: v.union(
       v.literal("provisioning"),
       v.literal("idle"),
@@ -115,4 +119,34 @@ export default defineSchema({
     payloadJson: v.string(),
     createdAt: v.number(),
   }).index("by_run_sequence", ["runId", "sequence"]),
+
+  /**
+   * Conversation-scoped file lifecycle across planes.
+   * - upload: user -> Convex storage -> sandbox workspace
+   * - download: sandbox workspace -> Convex storage -> signed URL
+   */
+  sessionFiles: defineTable({
+    conversationId: v.id("conversations"),
+    runId: v.optional(v.id("runs")),
+    direction: v.union(v.literal("upload"), v.literal("download")),
+    source: v.union(v.literal("user"), v.literal("agent")),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("processing"),
+      v.literal("ready"),
+      v.literal("error"),
+    ),
+    displayName: v.string(),
+    sandboxPath: v.optional(v.string()),
+    storageId: v.optional(v.id("_storage")),
+    contentType: v.optional(v.string()),
+    sizeBytes: v.optional(v.number()),
+    downloadedAt: v.optional(v.number()),
+    error: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_conversationId_and_createdAt", ["conversationId", "createdAt"])
+    .index("by_conversationId_and_runId", ["conversationId", "runId"])
+    .index("by_status_and_updatedAt", ["status", "updatedAt"]),
 });

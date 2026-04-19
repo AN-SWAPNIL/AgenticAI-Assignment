@@ -5,6 +5,7 @@ This project implements an agentic chat system with a strict control-plane / exe
 - Control plane: React UI + Convex state and orchestration.
 - Execution plane: one isolated Daytona sandbox per conversation.
 - Agent runtime: long-lived Pi Agent daemon inside each sandbox, using Gemini (`gemini-2.5-flash`).
+- Conversation-scoped file lifecycle: user upload to sandbox, agent-exported downloadable artifacts, and full file history.
 
 The goal is to satisfy the assignment requirement that the agent executes inside an isolated VM while preserving good observability (timeline, tool history, run state, and raw events).
 
@@ -69,7 +70,7 @@ flowchart TB
     ORCH --> DAYTONA["Daytona sandbox"]
     DAYTONA --> SESSION["Persistent session"]
     SESSION --> DAEMON["Pi daemon"]
-    DAEMON --> TOOLS["bash / read / write / edit / grep / glob / webfetch / websearch"]
+    DAEMON --> TOOLS["bash / read / write / edit / grep / glob / webfetch / websearch / share_file"]
     TOOLS --> WORKSPACE["/home/daytona/workspace"]
     DAEMON --> GEMINI["Gemini 2.5 Flash"]
   end
@@ -384,6 +385,8 @@ AgenticAI-Assignment/
   - normalized tool logs (start/end, output/error, duration)
 - `timelineEvents`
   - full runtime event stream for observability
+- `sessionFiles`
+  - upload/download ledger (status, sandbox path, storage link, size, download timestamp)
 
 ## Setup
 
@@ -393,6 +396,7 @@ AgenticAI-Assignment/
 - Convex account
 - Daytona API key
 - Gemini API key
+- Tavily API key (recommended for better web search)
 
 ### Install
 
@@ -413,6 +417,7 @@ This writes deployment values to `.env.local`.
 ```bash
 npx convex env set DAYTONA_API_KEY "..."
 npx convex env set GEMINI_API_KEY "..."
+npx convex env set TAVILY_API_KEY "..."
 ```
 
 ### Build and typecheck
@@ -439,6 +444,7 @@ Open: `http://localhost:5173`
 - Convex deployment secrets:
   - `DAYTONA_API_KEY`
   - `GEMINI_API_KEY`
+  - `TAVILY_API_KEY` (optional, enables Tavily-first `websearch`)
 
 Sandbox daemon receives:
 
@@ -446,9 +452,30 @@ Sandbox daemon receives:
 - `CONVEX_CONVERSATION_ID`
 - `CONVEX_AGENT_TOKEN`
 - `GEMINI_API_KEY`
+- `TAVILY_API_KEY`
 - `AGENT_WORKSPACE_DIR`
 - `AGENT_MODEL_ID`
 - `AGENT_THINKING_LEVEL`
+
+## File Transfer Lifecycle
+
+This implementation supports bidirectional conversation-scoped file handling:
+
+1. User upload:
+   - UI requests short-lived upload URL from Convex.
+   - Browser uploads file bytes directly to Convex storage.
+   - Backend transfer worker places the file into the conversation sandbox at
+     `/home/daytona/workspace/uploads/...`.
+2. Agent export:
+   - Agent uses `share_file` tool on a workspace file path.
+   - Backend export worker downloads from Daytona and stores it in Convex storage.
+   - UI shows a ready-to-download artifact card in chat and in observability history.
+3. Session history:
+   - Every upload/download is recorded in `sessionFiles` with status transitions
+     (`queued -> processing -> ready/error`), size, sandbox path, and timestamps.
+
+Transfer policy:
+- max file size is 25 MB for both upload and export workers.
 
 ## Troubleshooting
 
@@ -529,11 +556,15 @@ This design optimizes for clarity, isolation, and observability over raw through
    - Best part: we get both raw forensic detail and clean UI-friendly tool history.
    - Cost: slightly more schema and ingest complexity than storing only one event stream.
 
-5. Bundled runtime shipped through Convex
+5. Explicit file transfer table (`sessionFiles`)
+   - Best part: download/upload state is durable, inspectable, and decoupled from message text.
+   - Cost: extra worker actions and storage bookkeeping.
+
+6. Bundled runtime shipped through Convex
    - Best part: the exact daemon code that Daytona receives is versioned and reproducible.
    - Cost: developers must remember to rebuild the bundle when runtime code changes.
 
-6. Gemini 2.5 Flash as default model
+7. Gemini 2.5 Flash as default model
    - Best part: fast and cheap enough for iterative demos.
    - Cost: free-tier quota limits can become the dominant source of failure in development.
 

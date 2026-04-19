@@ -11,6 +11,7 @@ export function buildSystemPrompt(workspaceDir: string): string {
     "Guidelines:",
     "- Prefer small, targeted tool calls over long speculative responses.",
     "- When modifying files, read first to confirm current state.",
+    "- If the user asks for a downloadable artifact, generate the file then call share_file.",
     "- When you've finished the user's task, provide a brief final summary.",
     "- Every tool call is visible to the user as it happens — no need to describe what you're about to do, just do it.",
   ].join("\n");

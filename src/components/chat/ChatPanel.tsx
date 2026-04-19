@@ -32,6 +32,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(
     const conversation = active.conversation;
     const messages = active.messages ?? [];
     const tools = active.conversationToolExecutions ?? [];
+    const sessionFiles = active.sessionFiles ?? [];
     const errorActive = conversation?.status === "error";
 
     return (
@@ -52,7 +53,11 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(
           </div>
         )}
 
-        <MessageList messages={messages} toolExecutions={tools} />
+        <MessageList
+          messages={messages}
+          toolExecutions={tools}
+          sessionFiles={sessionFiles}
+        />
         <Composer
           ref={composerRef}
           conversationId={conversationId}

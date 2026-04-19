@@ -1,11 +1,13 @@
 import clsx from "clsx";
 import { Markdown } from "../../lib/markdown";
-import type { Message, ToolExecution } from "../../types";
+import type { Message, SessionFileView, ToolExecution } from "../../types";
+import { InlineFileArtifact } from "./InlineFileArtifact";
 import { InlineToolCall } from "./InlineToolCall";
 
 interface MessageBubbleProps {
   message: Message;
   toolExecutions: ToolExecution[];
+  fileArtifacts: SessionFileView[];
 }
 
 /**
@@ -13,7 +15,7 @@ interface MessageBubbleProps {
  * happened during this run *after* the text — the simplest faithful presentation given the
  * agent emits text deltas and tool calls without strong ordering hints.
  */
-export function MessageBubble({ message, toolExecutions }: MessageBubbleProps) {
+export function MessageBubble({ message, toolExecutions, fileArtifacts }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isStreaming = message.status === "streaming" || message.status === "pending";
 
@@ -55,6 +57,14 @@ export function MessageBubble({ message, toolExecutions }: MessageBubbleProps) {
           <div className="mt-2">
             {toolExecutions.map((tool) => (
               <InlineToolCall key={tool._id} execution={tool} />
+            ))}
+          </div>
+        )}
+
+        {!isUser && fileArtifacts.length > 0 && (
+          <div className="mt-2">
+            {fileArtifacts.map((file) => (
+              <InlineFileArtifact key={file._id} file={file} />
             ))}
           </div>
         )}

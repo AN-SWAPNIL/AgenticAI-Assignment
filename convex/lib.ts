@@ -37,5 +37,35 @@ export function defaultConversationTitle(): string {
   return `Session ${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
 }
 
+/**
+ * Deterministic first-turn title from user text. Keeps titles short and stable without
+ * spending extra tokens on an LLM title-generation step.
+ */
+export function deriveAutoTitleFromUserMessage(input: string): string {
+  const normalized = input.replace(/\s+/g, " ").trim();
+  if (!normalized) return defaultConversationTitle();
+  const firstSentence = normalized.split(/[.!?\n]/, 1)[0]?.trim() || normalized;
+  const cleaned = firstSentence.replace(/^[-*#>\s]+/, "").trim();
+  const max = 56;
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, max - 3).trimEnd()}...`;
+}
+
+export function fileBasename(candidate: string): string {
+  const normalized = candidate.replace(/\\/g, "/");
+  const tail = normalized.split("/").filter(Boolean).at(-1) ?? "file.bin";
+  return tail.trim() || "file.bin";
+}
+
+export function sanitizeDisplayName(candidate: string): string {
+  const base = fileBasename(candidate)
+    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .trim();
+  if (!base) return "file.bin";
+  const bounded = base.slice(0, 120);
+  return bounded || "file.bin";
+}
+
 export type ConversationDoc = Doc<"conversations">;
 export type RunDoc = Doc<"runs">;

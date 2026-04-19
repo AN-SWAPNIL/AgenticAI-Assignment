@@ -24,6 +24,7 @@ export interface RunLoopOptions {
   workspace: Workspace;
   modelId: string;
   apiKey: string;
+  tavilyApiKey?: string;
   thinkingLevel?: "off" | "low" | "medium" | "high";
   historyLimit?: number;
 }
@@ -124,6 +125,14 @@ export async function processRun(
     workspace: opts.workspace,
     modelId: opts.modelId,
     apiKey: opts.apiKey,
+    tavilyApiKey: opts.tavilyApiKey,
+    onQueueFileExport: async ({ path, displayName }) =>
+      await bridge.mutation(api.ingest.requestFileExport, {
+        runId,
+        runToken,
+        path,
+        displayName,
+      }),
     thinkingLevel: opts.thinkingLevel,
   });
 

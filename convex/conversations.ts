@@ -2,7 +2,11 @@ import { v } from "convex/values";
 import { api } from "./_generated/api";
 import { type Doc, type Id } from "./_generated/dataModel";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
-import { defaultConversationTitle, generateToken } from "./lib";
+import {
+  defaultConversationTitle,
+  deriveAutoTitleFromUserMessage,
+  generateToken,
+} from "./lib";
 
 /**
  * Public API for the control plane. The UI calls only these queries + mutations.
@@ -124,8 +128,10 @@ export const create = mutation({
   args: { title: v.optional(v.string()) },
   handler: async (ctx, { title }): Promise<{ conversationId: Id<"conversations"> }> => {
     const now = Date.now();
+    const cleanedTitle = title?.trim();
     const conversationId = await ctx.db.insert("conversations", {
-      title: title?.trim() || defaultConversationTitle(),
+      title: cleanedTitle || defaultConversationTitle(),
+      titleMode: cleanedTitle ? "manual" : "default",
       status: "provisioning",
       agentToken: generateToken(),
       createdAt: now,
@@ -141,6 +147,7 @@ export const rename = mutation({
   handler: async (ctx, { conversationId, title }) => {
     await ctx.db.patch(conversationId, {
       title: title.trim() || defaultConversationTitle(),
+      titleMode: "manual",
       updatedAt: Date.now(),
     });
   },
@@ -172,6 +179,7 @@ export const sendMessage = mutation({
     const nextOrder = priorMessages.length;
 
     const now = Date.now();
+    const hasPriorUserMessage = priorMessages.some((message) => message.role === "user");
 
     const userMessageId = await ctx.db.insert("messages", {
       conversationId,
@@ -190,7 +198,18 @@ export const sendMessage = mutation({
       createdAt: now,
     });
 
-    await ctx.db.patch(conversationId, { updatedAt: now });
+    const patch: {
+      updatedAt: number;
+      title?: string;
+      titleMode?: "auto";
+    } = { updatedAt: now };
+
+    if (!hasPriorUserMessage && conversation.titleMode !== "manual") {
+      patch.title = deriveAutoTitleFromUserMessage(trimmed);
+      patch.titleMode = "auto";
+    }
+
+    await ctx.db.patch(conversationId, patch);
 
     return { runId, userMessageId };
   },

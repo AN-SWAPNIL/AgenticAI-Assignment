@@ -1,7 +1,8 @@
 import { v } from "convex/values";
+import { internal } from "./_generated/api";
 import { type Doc, type Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
-import { tokensMatch } from "./lib";
+import { fileBasename, sanitizeDisplayName, tokensMatch } from "./lib";
 
 /**
  * VM-facing surface. Every function here is called by the in-VM agent daemon via a Convex
@@ -44,6 +45,39 @@ async function requireRun(
     throw new Error("Invalid run token");
   }
   return run;
+}
+
+const DEFAULT_WORKSPACE_DIR = "/home/daytona/workspace";
+
+function normalizeExportPath(workspaceDir: string | undefined, rawPath: string): string {
+  const workspaceRoot = (workspaceDir || DEFAULT_WORKSPACE_DIR).replace(/\/+$/, "");
+  const normalizedInput = rawPath.replace(/\\/g, "/").replace(/\s+/g, " ").trim();
+  if (!normalizedInput) {
+    throw new Error("Path cannot be empty");
+  }
+  if (normalizedInput.includes("\u0000")) {
+    throw new Error("Path contains invalid characters");
+  }
+
+  const pathSegments = normalizedInput
+    .replace(/^\.?\//, "")
+    .split("/")
+    .filter(Boolean);
+  if (pathSegments.length === 0) {
+    throw new Error("Path must point to a file");
+  }
+  if (pathSegments.some((segment) => segment === "..")) {
+    throw new Error("Path traversal is not allowed");
+  }
+
+  const absolutePath = normalizedInput.startsWith("/")
+    ? `/${pathSegments.join("/")}`
+    : `${workspaceRoot}/${pathSegments.join("/")}`;
+
+  if (absolutePath === workspaceRoot || !absolutePath.startsWith(`${workspaceRoot}/`)) {
+    throw new Error(`Path must stay inside workspace (${workspaceRoot})`);
+  }
+  return absolutePath;
 }
 
 // ─── daemon subscription target ─────────────────────────────────────────────
@@ -329,5 +363,45 @@ export const finalizeRun = mutation({
       lastError: status === "error" ? error : undefined,
       updatedAt: now,
     });
+  },
+});
+
+export const requestFileExport = mutation({
+  args: {
+    runId: v.id("runs"),
+    runToken: v.string(),
+    path: v.string(),
+    displayName: v.optional(v.string()),
+  },
+  handler: async (
+    ctx,
+    { runId, runToken, path, displayName },
+  ): Promise<{ sessionFileId: Id<"sessionFiles"> }> => {
+    const run = await requireRun(ctx, runId, runToken);
+    const conversation = await ctx.db.get(run.conversationId);
+    if (!conversation || conversation.status === "deleted") {
+      throw new Error("Conversation not found");
+    }
+
+    const sandboxPath = normalizeExportPath(conversation.workspaceDir, path);
+    const now = Date.now();
+    const preferredName = displayName?.trim() || fileBasename(sandboxPath);
+    const sessionFileId = await ctx.db.insert("sessionFiles", {
+      conversationId: run.conversationId,
+      runId,
+      direction: "download",
+      source: "agent",
+      status: "queued",
+      displayName: sanitizeDisplayName(preferredName),
+      sandboxPath,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.scheduler.runAfter(0, internal.fileTransfers.processExportToStorage, {
+      sessionFileId,
+    });
+
+    return { sessionFileId };
   },
 });

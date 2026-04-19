@@ -9,7 +9,7 @@ import { processRun } from "./runLoop.js";
  *
  * Lifecycle:
  *   1. Parse env (CONVEX_URL, CONVEX_CONVERSATION_ID, CONVEX_AGENT_TOKEN, GEMINI_API_KEY,
- *      AGENT_WORKSPACE_DIR, AGENT_MODEL_ID, AGENT_THINKING_LEVEL).
+ *      TAVILY_API_KEY, AGENT_WORKSPACE_DIR, AGENT_MODEL_ID, AGENT_THINKING_LEVEL).
  *   2. Prepare workspace directory.
  *   3. Open ConvexBridge (WebSocket + HTTP).
  *   4. Heartbeat every 10s (lets the orphan sweeper + UI know we're alive).
@@ -28,6 +28,7 @@ interface DaemonEnv {
   conversationId: string;
   agentToken: string;
   geminiApiKey: string;
+  tavilyApiKey?: string;
   workspaceDir: string;
   modelId: string;
   thinkingLevel: "off" | "low" | "medium" | "high";
@@ -54,6 +55,7 @@ function readEnv(): DaemonEnv {
     conversationId: get("CONVEX_CONVERSATION_ID"),
     agentToken: get("CONVEX_AGENT_TOKEN"),
     geminiApiKey: get("GEMINI_API_KEY"),
+    tavilyApiKey: optional("TAVILY_API_KEY", "") || undefined,
     workspaceDir: optional("AGENT_WORKSPACE_DIR", "/home/daytona/workspace"),
     modelId: optional("AGENT_MODEL_ID", "gemini-2.5-flash"),
     thinkingLevel: thinking as DaemonEnv["thinkingLevel"],
@@ -108,6 +110,7 @@ async function main(): Promise<void> {
             workspace,
             modelId: env.modelId,
             apiKey: env.geminiApiKey,
+            tavilyApiKey: env.tavilyApiKey,
             thinkingLevel: env.thinkingLevel,
           },
           runId,

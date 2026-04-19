@@ -87,6 +87,17 @@ export const api = {
       },
       null
     >,
+    requestFileExport: makeFunctionReference<"mutation">(
+      "ingest:requestFileExport",
+    ) as M<
+      {
+        runId: string;
+        runToken: string;
+        path: string;
+        displayName?: string;
+      },
+      { sessionFileId: string }
+    >,
   },
   conversations: {
     messages: makeFunctionReference<"query">("conversations:messages") as Q<
