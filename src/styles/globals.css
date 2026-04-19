@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Color tokens. We define the dark palette by default; the .light root override flips them.
+ * Keeping tokens in CSS rather than Tailwind config means we can swap theme without rebuild.
+ */
+:root {
+  --surface-0: 12 14 20;
+  --surface-1: 18 21 30;
+  --surface-2: 26 30 42;
+  --surface-3: 35 41 56;
+  --ink: 235 240 248;
+  --ink-muted: 168 178 196;
+  --ink-soft: 120 132 154;
+  --accent: 120 162 255;
+  --accent-soft: 50 80 160;
+  --success: 76 200 138;
+  --warning: 240 188 96;
+  --danger: 240 110 110;
+  --border: 38 44 60;
+
+  color-scheme: dark;
+}
+
+.light {
+  --surface-0: 248 250 254;
+  --surface-1: 240 243 248;
+  --surface-2: 230 234 242;
+  --surface-3: 218 224 234;
+  --ink: 18 22 32;
+  --ink-muted: 78 88 104;
+  --ink-soft: 132 142 158;
+  --accent: 50 96 220;
+  --accent-soft: 200 215 248;
+  --success: 36 152 96;
+  --warning: 198 138 34;
+  --danger: 200 60 60;
+  --border: 210 216 228;
+
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Subtle scrollbar styling — we don't want the default chunky white scrollbars in dark mode. */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(var(--surface-3));
+  border-radius: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Markdown reset — react-markdown emits prose; we restyle so it fits the chat bubble layout. */
+.markdown {
+  @apply text-[15px] leading-relaxed;
+}
+.markdown p {
+  @apply my-2 first:mt-0 last:mb-0;
+}
+.markdown ul,
+.markdown ol {
+  @apply my-2 ml-5 list-outside;
+}
+.markdown ul {
+  @apply list-disc;
+}
+.markdown ol {
+  @apply list-decimal;
+}
+.markdown code {
+  @apply rounded bg-surface-3/80 px-1 py-[1px] font-mono text-[0.85em];
+}
+.markdown pre {
+  @apply my-3 overflow-x-auto rounded-lg bg-surface-0 p-3 text-[13px] leading-relaxed;
+}
+.markdown pre code {
+  @apply block rounded-none bg-transparent p-0;
+}
+.markdown a {
+  @apply text-accent underline decoration-dotted underline-offset-2 hover:opacity-80;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  @apply mt-3 font-semibold;
+}
+.markdown h1 {
+  @apply text-lg;
+}
+.markdown h2 {
+  @apply text-base;
+}
+.markdown h3 {
+  @apply text-[15px];
+}
+.markdown blockquote {
+  @apply my-2 border-l-2 border-surface-3 pl-3 text-ink-muted;
+}
+.markdown table {
+  @apply my-2 w-full border-collapse text-sm;
+}
+.markdown th,
+.markdown td {
+  @apply border border-border px-2 py-1 text-left;
+}

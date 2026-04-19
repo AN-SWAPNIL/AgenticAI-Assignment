@@ -1,0 +1,13 @@
+{
+  "name": "pi-agent-host",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Pi Agent daemon that runs inside each Daytona sandbox. Shipped as a bundled agentHost.mjs.",
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "latest",
+    "@mariozechner/pi-ai": "latest",
+    "@sinclair/typebox": "^0.34.41",
+    "convex": "^1.35.1"
+  }
+}
