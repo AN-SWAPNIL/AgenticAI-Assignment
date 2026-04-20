@@ -33,7 +33,7 @@ interface DaemonEnv {
   tavilyApiKey?: string;
   workspaceDir: string;
   modelId: string;
-  thinkingLevel: "off" | "low" | "medium" | "high";
+  thinkingLevel: "off" | "minimal" | "low" | "medium" | "high";
 }
 
 function readEnv(): DaemonEnv {
@@ -49,7 +49,7 @@ function readEnv(): DaemonEnv {
     return v && v.trim().length > 0 ? v.trim() : fallback;
   };
   const thinking = optional("AGENT_THINKING_LEVEL", "off");
-  if (!["off", "low", "medium", "high"].includes(thinking)) {
+  if (!["off", "minimal", "low", "medium", "high"].includes(thinking)) {
     throw new Error(`Invalid AGENT_THINKING_LEVEL: ${thinking}`);
   }
   return {

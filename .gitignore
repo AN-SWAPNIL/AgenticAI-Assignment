@@ -16,6 +16,7 @@ pnpm-debug.log*
 # Convex local/generated artifacts
 .convex/
 convex/_generated/
+convex/runtime/
 convex/local_backend/
 
 # OS / editor

@@ -126,7 +126,6 @@ function ColorizedJson({ raw }: { raw: string }) {
   return (
     <pre
       className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink"
-      // eslint-disable-next-line react/no-danger
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );

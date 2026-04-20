@@ -11,7 +11,6 @@ import { sanitizeDisplayName } from "./lib";
 const DAYTONA_TARGET = "eu";
 const MAX_TRANSFER_BYTES = 25 * 1024 * 1024;
 const DEFAULT_WORKSPACE_DIR = "/home/daytona/workspace";
-const UPLOADS_DIR = `${DEFAULT_WORKSPACE_DIR}/uploads`;
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -33,9 +32,11 @@ function toErrorText(error: unknown): string {
   return String(error);
 }
 
-function fallbackUploadPath(displayName: string): string {
+function fallbackUploadPath(displayName: string, workspaceDir?: string): string {
+  const rootDir = (workspaceDir || DEFAULT_WORKSPACE_DIR).replace(/\/+$/, "");
+  const uploadsDir = `${rootDir}/uploads`;
   const safe = sanitizeDisplayName(displayName);
-  return `${UPLOADS_DIR}/${Date.now()}-${safe}`;
+  return `${uploadsDir}/${Date.now()}-${safe}`;
 }
 
 export const processUploadToSandbox = internalAction({
@@ -85,9 +86,12 @@ export const processUploadToSandbox = internalAction({
       } catch {
         // sandbox already running
       }
-      await sandbox.fs.createFolder(UPLOADS_DIR, "755").catch(() => undefined);
+      const uploadsDir = `${(conversation.workspaceDir || DEFAULT_WORKSPACE_DIR).replace(/\/+$/, "")}/uploads`;
+      await sandbox.fs.createFolder(uploadsDir, "755").catch(() => undefined);
 
-      const destination = sessionFile.sandboxPath || fallbackUploadPath(sessionFile.displayName);
+      const destination =
+        sessionFile.sandboxPath ||
+        fallbackUploadPath(sessionFile.displayName, conversation.workspaceDir);
       await sandbox.fs.uploadFile(Buffer.from(arrayBuffer), destination);
 
       await ctx.runMutation(internal.files.patchForTransferWorker, {

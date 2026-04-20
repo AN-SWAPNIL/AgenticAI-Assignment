@@ -20,8 +20,9 @@ export const listStaleRunning = internalQuery({
   handler: async (ctx, { staleBefore }): Promise<Doc<"conversations">[]> => {
     return ctx.db
       .query("conversations")
-      .withIndex("by_status", (q) => q.eq("status", "running"))
-      .filter((q) => q.lt(q.field("lastHeartbeatAt"), staleBefore))
+      .withIndex("by_status_and_lastHeartbeatAt", (q) =>
+        q.eq("status", "running").lt("lastHeartbeatAt", staleBefore),
+      )
       .take(50);
   },
 });

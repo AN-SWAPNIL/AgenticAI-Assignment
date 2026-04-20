@@ -47,6 +47,10 @@ async function requireRun(
   return run;
 }
 
+function canAcceptRuntimeUpdates(run: Doc<"runs">): boolean {
+  return run.status === "running";
+}
+
 const DEFAULT_WORKSPACE_DIR = "/home/daytona/workspace";
 
 function normalizeExportPath(workspaceDir: string | undefined, rawPath: string): string {
@@ -149,6 +153,7 @@ export const claimRun = mutation({
     { conversationId, agentToken, runId },
   ): Promise<{
     runToken: string;
+    userMessageId: Id<"messages">;
     modelId: string;
     userMessageContent: string;
     attachmentUrls: string[];
@@ -206,6 +211,7 @@ export const claimRun = mutation({
 
     return {
       runToken: run.runToken,
+      userMessageId: run.userMessageId,
       modelId: conversation?.modelId ?? "gemini-2.5-flash",
       userMessageContent: userMessage.content,
       attachmentUrls,
@@ -255,6 +261,9 @@ export const appendAssistantDelta = mutation({
   },
   handler: async (ctx, { runId, runToken, messageId, chunk }) => {
     const run = await requireRun(ctx, runId, runToken);
+    if (!canAcceptRuntimeUpdates(run)) {
+      return { accepted: false as const };
+    }
     const message = await ctx.db.get(messageId);
     if (!message || message.runId !== runId) {
       throw new Error("Message does not belong to this run");
@@ -264,6 +273,7 @@ export const appendAssistantDelta = mutation({
       status: "streaming",
     });
     await ctx.db.patch(run.conversationId, { updatedAt: Date.now() });
+    return { accepted: true as const };
   },
 });
 
@@ -276,6 +286,9 @@ export const syncAssistantMessageContent = mutation({
   },
   handler: async (ctx, { runId, runToken, messageId, content }) => {
     const run = await requireRun(ctx, runId, runToken);
+    if (!canAcceptRuntimeUpdates(run)) {
+      return { accepted: false as const };
+    }
     const message = await ctx.db.get(messageId);
     if (!message || message.runId !== runId) {
       throw new Error("Message does not belong to this run");
@@ -285,6 +298,7 @@ export const syncAssistantMessageContent = mutation({
       status: "streaming",
     });
     await ctx.db.patch(run.conversationId, { updatedAt: Date.now() });
+    return { accepted: true as const };
   },
 });
 
@@ -296,8 +310,12 @@ export const syncThinkingContent = mutation({
     thinkingContent: v.string(),
   },
   handler: async (ctx, { runId, runToken, messageId, thinkingContent }) => {
-    await requireRun(ctx, runId, runToken);
+    const run = await requireRun(ctx, runId, runToken);
+    if (!canAcceptRuntimeUpdates(run)) {
+      return { accepted: false as const };
+    }
     await ctx.db.patch(messageId, { thinkingContent });
+    return { accepted: true as const };
   },
 });
 
@@ -314,6 +332,9 @@ export const startToolExecution = mutation({
     { runId, runToken, sequence, toolName, inputJson },
   ): Promise<Id<"toolExecutions">> => {
     const run = await requireRun(ctx, runId, runToken);
+    if (!canAcceptRuntimeUpdates(run)) {
+      throw new Error("Run is no longer active");
+    }
     return await ctx.db.insert("toolExecutions", {
       conversationId: run.conversationId,
       runId,
@@ -341,7 +362,10 @@ export const finishToolExecution = mutation({
   ) => {
     const record = await ctx.db.get(toolExecutionId);
     if (!record) throw new Error("Tool execution not found");
-    await requireRun(ctx, record.runId, runToken);
+    const run = await requireRun(ctx, record.runId, runToken);
+    if (!canAcceptRuntimeUpdates(run)) {
+      return { accepted: false as const };
+    }
     await ctx.db.patch(toolExecutionId, {
       status,
       outputText,
@@ -349,6 +373,7 @@ export const finishToolExecution = mutation({
       durationMs,
       completedAt: Date.now(),
     });
+    return { accepted: true as const };
   },
 });
 
@@ -362,6 +387,9 @@ export const appendTimelineEvent = mutation({
   },
   handler: async (ctx, { runId, runToken, sequence, type, payloadJson }) => {
     const run = await requireRun(ctx, runId, runToken);
+    if (!canAcceptRuntimeUpdates(run)) {
+      return { accepted: false as const };
+    }
     await ctx.db.insert("timelineEvents", {
       conversationId: run.conversationId,
       runId,
@@ -370,6 +398,7 @@ export const appendTimelineEvent = mutation({
       payloadJson,
       createdAt: Date.now(),
     });
+    return { accepted: true as const };
   },
 });
 
@@ -382,6 +411,9 @@ export const finalizeRun = mutation({
   },
   handler: async (ctx, { runId, runToken, status, error }) => {
     const run = await requireRun(ctx, runId, runToken);
+    if (run.status === "completed" || run.status === "error") {
+      return { accepted: false as const };
+    }
     const now = Date.now();
 
     await ctx.db.patch(runId, {
@@ -411,6 +443,7 @@ export const finalizeRun = mutation({
       lastError: status === "error" ? error : undefined,
       updatedAt: now,
     });
+    return { accepted: true as const };
   },
 });
 
@@ -431,6 +464,7 @@ export const cancelRun = mutation({
       await ctx.db.patch(run.assistantMessageId, { status: "completed", content: "[Cancelled]" });
     }
     await ctx.db.patch(run.conversationId, { status: "idle", updatedAt: now });
+    return { accepted: true as const };
   },
 });
 
@@ -447,10 +481,14 @@ export const appendToolOutput = mutation({
   handler: async (ctx, { toolExecutionId, runToken, chunk }) => {
     const record = await ctx.db.get(toolExecutionId);
     if (!record) throw new Error("Tool execution not found");
-    await requireRun(ctx, record.runId, runToken);
+    const run = await requireRun(ctx, record.runId, runToken);
+    if (!canAcceptRuntimeUpdates(run)) {
+      return { accepted: false as const };
+    }
     await ctx.db.patch(toolExecutionId, {
       outputText: (record.outputText ?? "") + chunk,
     });
+    return { accepted: true as const };
   },
 });
 

@@ -60,7 +60,7 @@ export function fileBasename(candidate: string): string {
 export function sanitizeDisplayName(candidate: string): string {
   const base = fileBasename(candidate)
     .replace(/[^\x20-\x7E]/g, "")
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .replace(/[<>:"/\\|?*]/g, "_")
     .trim();
   if (!base) return "file.bin";
   const bounded = base.slice(0, 120);

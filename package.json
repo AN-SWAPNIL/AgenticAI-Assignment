@@ -1,9 +1,9 @@
 {
-  "name": "agenticai-assignment",
+  "name": "smart-pi-assistant",
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Isolated agent chatbot — Convex control plane + Daytona execution plane + Pi Agent runtime",
+  "description": "Smart Pi Assistant - isolated agent chat with Convex, Daytona, and Pi runtime",
   "scripts": {
     "bundle:agent": "node scripts/bundle-runtime.mjs",
     "predev": "npm run bundle:agent",

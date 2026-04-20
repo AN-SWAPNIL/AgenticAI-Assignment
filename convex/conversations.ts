@@ -109,6 +109,14 @@ export const latestRun = query({
   },
 });
 
+/** Fetch a specific run row by id (used for selecting timeline from a chat response). */
+export const runById = query({
+  args: { runId: v.id("runs") },
+  handler: async (ctx, { runId }): Promise<Doc<"runs"> | null> => {
+    return await ctx.db.get(runId);
+  },
+});
+
 /**
  * Latest run that is meaningful for telemetry. If the newest run is still queued and has no
  * events yet, fall back to the most recent non-queued run so observability panels don't
@@ -288,6 +296,12 @@ export const sendMessage = mutation({
     }
 
     await ctx.db.patch(conversationId, patch);
+
+    // Old conversations can have stale/missing daemons while still looking "idle" in the UI.
+    // Trigger a lightweight revive check on every send so queued runs don't get stuck.
+    await ctx.scheduler.runAfter(0, api.orchestrator.reviveDaemonIfDead, {
+      conversationId,
+    });
 
     return { runId, userMessageId };
   },

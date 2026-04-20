@@ -27,7 +27,7 @@ export interface RunLoopOptions {
   anthropicApiKey?: string;
   openAiApiKey?: string;
   tavilyApiKey?: string;
-  thinkingLevel?: "off" | "low" | "medium" | "high";
+  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
   historyLimit?: number;
 }
 
@@ -73,7 +73,15 @@ export async function processRun(
     return;
   }
 
-  const { runToken, modelId: claimModelId, userMessageContent, attachmentUrls, attachedFiles, summaryContext } = claim;
+  const {
+    runToken,
+    userMessageId,
+    modelId: claimModelId,
+    userMessageContent,
+    attachmentUrls,
+    attachedFiles,
+    summaryContext,
+  } = claim;
   const runId = queuedRunId;
 
   const messageId = await bridge.mutation(api.ingest.ensureAssistantMessage, {
@@ -137,9 +145,9 @@ export async function processRun(
     .filter(
       (m) =>
         (m.role === "user" || m.role === "assistant") &&
+        m._id !== userMessageId &&
         m._id !== messageId &&
-        m.content.length > 0 &&
-        m.content !== userMessageContent,
+        m.content.length > 0,
     )
     .slice(-historyLimit);
 
@@ -372,7 +380,7 @@ async function downloadAttachmentsToWorkspace(
 }
 
 function sanitizeFilename(name: string): string {
-  return name.replace(/[^\w.\-]/g, "_").slice(0, 120) || "attachment";
+  return name.replace(/[^\w.-]/g, "_").slice(0, 120) || "attachment";
 }
 
 // ─── auto-summarization ──────────────────────────────────────────────────────

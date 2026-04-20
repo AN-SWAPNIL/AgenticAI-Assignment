@@ -7,23 +7,24 @@ import { ObservabilityPanel } from "./components/observability/ObservabilityPane
 import { useActiveRun } from "./hooks/useActiveRun";
 import { useConversations } from "./hooks/useConversations";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
-import type { ConversationId } from "./types";
+import type { ConversationId, RunId } from "./types";
 
-const THEME_STORAGE_KEY = "pi-agent-theme";
+const THEME_STORAGE_KEY = "smart-pi-assistant:theme";
 
 export default function App() {
   const [selectedId, setSelectedId] = useState<ConversationId | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<RunId | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     const stored = localStorage.getItem(THEME_STORAGE_KEY);
     return stored === "light" ? "light" : "dark";
   });
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const previousLatestRunIdRef = useRef<RunId | null>(null);
 
   const conversations = useConversations();
-  const active = useActiveRun(selectedId);
+  const active = useActiveRun(selectedId, selectedRunId);
 
-  // Auto-select the first conversation if none is selected and the list arrives.
-  // Also clear selection if the selected conversation was deleted (no longer in list).
+  // Auto-select first conversation when list loads.
   useEffect(() => {
     if (!conversations) return;
     if (selectedId) {
@@ -35,7 +36,23 @@ export default function App() {
     if (firstConversation) setSelectedId(firstConversation._id);
   }, [conversations, selectedId]);
 
-  // Keep the html element's class in sync for tailwind's dark/light variants.
+  // Clear selected timeline run when switching conversations.
+  useEffect(() => {
+    setSelectedRunId(null);
+    previousLatestRunIdRef.current = null;
+  }, [selectedId]);
+
+  // If a new run arrives, jump observability back to the newest run immediately.
+  useEffect(() => {
+    const latestRunId = active.latestRun?._id ?? null;
+    const previous = previousLatestRunIdRef.current;
+    if (previous && latestRunId && previous !== latestRunId) {
+      setSelectedRunId(null);
+    }
+    previousLatestRunIdRef.current = latestRunId;
+  }, [active.latestRun?._id]);
+
+  // Keep root class in sync for theme variants.
   useEffect(() => {
     const root = document.documentElement;
     root.classList.toggle("dark", theme === "dark");
@@ -44,11 +61,7 @@ export default function App() {
   }, [theme]);
 
   const handleNew = useCallback(() => {
-    // Surface the New button programmatically by clicking; the button itself owns the
-    // mutation+action sequence so we don't duplicate that here.
-    const btn = document.querySelector<HTMLButtonElement>(
-      "[data-test=new-conversation], button:has(kbd)",
-    );
+    const btn = document.querySelector<HTMLButtonElement>("[data-test=new-conversation]");
     btn?.click();
   }, []);
 
@@ -75,16 +88,13 @@ export default function App() {
 
   return (
     <AppShell
-      statusBar={
-        <StatusBar
-          conversation={active.conversation}
-          theme={theme}
-          onToggleTheme={handleToggleTheme}
-        />
-      }
+      statusBar={<StatusBar conversation={active.conversation} />}
       sidebar={
         <ConversationList
           selectedId={selectedId}
+          conversation={active.conversation}
+          theme={theme}
+          onToggleTheme={handleToggleTheme}
           onSelect={setSelectedId}
           onDeleted={handleDeleted}
         />
@@ -94,9 +104,16 @@ export default function App() {
           ref={composerRef}
           conversationId={selectedId}
           active={active}
+          selectedRunId={selectedRunId}
+          onSelectRun={setSelectedRunId}
         />
       }
-      observability={<ObservabilityPanel active={active} />}
+      observability={
+        <ObservabilityPanel
+          active={active}
+          onResetRunSelection={() => setSelectedRunId(null)}
+        />
+      }
     />
   );
 }

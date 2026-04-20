@@ -6,7 +6,6 @@ import { sanitizeDisplayName } from "./lib";
 
 const MAX_TRANSFER_BYTES = 25 * 1024 * 1024;
 const DEFAULT_WORKSPACE_DIR = "/home/daytona/workspace";
-const UPLOADS_DIR = `${DEFAULT_WORKSPACE_DIR}/uploads`;
 
 type SessionFileDoc = Doc<"sessionFiles">;
 
@@ -14,9 +13,11 @@ function randomTag(): string {
   return Math.random().toString(36).slice(2, 9);
 }
 
-function buildUploadPath(displayName: string): string {
+function buildUploadPath(displayName: string, workspaceDir?: string): string {
+  const rootDir = (workspaceDir || DEFAULT_WORKSPACE_DIR).replace(/\/+$/, "");
+  const uploadsDir = `${rootDir}/uploads`;
   const safeName = sanitizeDisplayName(displayName);
-  return `${UPLOADS_DIR}/${Date.now()}-${randomTag()}-${safeName}`;
+  return `${uploadsDir}/${Date.now()}-${randomTag()}-${safeName}`;
 }
 
 export const generateUploadUrl = mutation({
@@ -60,7 +61,7 @@ export const registerUpload = mutation({
       source: "user",
       status: "queued",
       displayName: sanitizeDisplayName(displayName),
-      sandboxPath: buildUploadPath(displayName),
+      sandboxPath: buildUploadPath(displayName, conversation.workspaceDir),
       storageId,
       contentType: contentType || metadata?.contentType || undefined,
       sizeBytes: resolvedSize,

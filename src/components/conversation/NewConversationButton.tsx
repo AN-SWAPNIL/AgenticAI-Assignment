@@ -7,11 +7,6 @@ interface NewConversationButtonProps {
   onCreated: (id: ConversationId) => void;
 }
 
-/**
- * Create button. Inserts a row in "provisioning" state, then kicks off the orchestrator
- * action to bring up the Daytona sandbox + launch the daemon. The conversation appears in
- * the list immediately (Convex reactivity) and transitions to "idle" when ready.
- */
 export function NewConversationButton({ onCreated }: NewConversationButtonProps) {
   const create = useMutation(api.conversations.create);
   const provision = useAction(api.orchestrator.provisionConversation);
@@ -25,7 +20,6 @@ export function NewConversationButton({ onCreated }: NewConversationButtonProps)
     try {
       const { conversationId } = await create({});
       onCreated(conversationId);
-      // Fire and forget — provisioning typically takes 30–60s; the UI tracks status reactively.
       provision({ conversationId }).catch((err) => {
         console.error("[ui] provision failed:", err);
       });
@@ -39,13 +33,14 @@ export function NewConversationButton({ onCreated }: NewConversationButtonProps)
   return (
     <div className="flex flex-col gap-1 px-3 pt-3">
       <button
+        data-test="new-conversation"
         type="button"
         onClick={handle}
         disabled={busy}
         className="flex items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-surface-0 shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {busy ? "Creating…" : "New conversation"}
-        <kbd className="rounded bg-surface-0/30 px-1 py-[1px] text-[10px] font-mono">⌘K</kbd>
+        {busy ? "Creating..." : "New conversation"}
+        <kbd className="rounded bg-surface-0/30 px-1 py-[1px] text-[10px] font-mono">Ctrl/Cmd+K</kbd>
       </button>
       {error && <p className="text-[11px] text-danger">{error}</p>}
     </div>

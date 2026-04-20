@@ -26,6 +26,7 @@ export const api = {
       { conversationId: string; agentToken: string; runId: string },
       {
         runToken: string;
+        userMessageId: string;
         modelId: string;
         userMessageContent: string;
         attachmentUrls: string[];

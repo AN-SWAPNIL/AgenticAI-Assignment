@@ -16,7 +16,7 @@ export interface AgentSessionOptions {
   }>;
   /** Live bash output streaming callback (toolCallId, chunk) → void. */
   onBashChunk?: (toolCallId: string, chunk: string) => void;
-  thinkingLevel?: "off" | "low" | "medium" | "high";
+  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
 }
 
 /**

@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { useMutation } from "convex/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import { formatRelative } from "../../lib/formatters";
 import type { Conversation, ConversationId } from "../../types";
@@ -31,6 +31,12 @@ export function ConversationItem({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conversation.title);
 
+  useEffect(() => {
+    if (!editing) {
+      setDraft(conversation.title);
+    }
+  }, [conversation.title, editing]);
+
   const handleDelete = async (event: React.MouseEvent) => {
     event.stopPropagation();
     if (!confirm("Delete this conversation and tear down its sandbox?")) return;
@@ -52,12 +58,9 @@ export function ConversationItem({
     <div
       className={clsx(
         "group flex w-full items-start gap-1 rounded-lg transition-colors",
-        selected
-          ? "bg-accent/10 ring-1 ring-accent/20"
-          : "hover:bg-surface-2",
+        selected ? "bg-accent/10 ring-1 ring-accent/20" : "hover:bg-surface-2",
       )}
     >
-      {/* Main select area — plain div when editing to avoid nesting input inside button */}
       {editing ? (
         <div className="flex min-w-0 flex-1 items-start gap-2.5 px-3 py-2.5">
           <span
@@ -68,10 +71,17 @@ export function ConversationItem({
             value={draft}
             aria-label="Conversation title"
             onChange={(e) => setDraft(e.target.value)}
-            onBlur={commitRename}
+            onBlur={() => {
+              void commitRename();
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") commitRename();
-              if (e.key === "Escape") { setEditing(false); setDraft(conversation.title); }
+              if (e.key === "Enter") {
+                void commitRename();
+              }
+              if (e.key === "Escape") {
+                setEditing(false);
+                setDraft(conversation.title);
+              }
             }}
             autoFocus
             className="min-w-0 flex-1 rounded border border-border bg-surface-0 px-1 py-[2px] text-sm text-ink"
@@ -81,7 +91,6 @@ export function ConversationItem({
         <button
           type="button"
           onClick={() => onSelect(conversation._id)}
-          onDoubleClick={(e) => { e.preventDefault(); setEditing(true); }}
           className={clsx(
             "flex min-w-0 flex-1 items-start gap-2.5 px-3 py-2.5 text-left",
             selected ? "text-ink" : "text-ink-muted hover:text-ink",
@@ -95,22 +104,65 @@ export function ConversationItem({
             <span className="block truncate text-[13px] font-medium leading-snug">
               {conversation.title}
             </span>
-            <span className="text-[10px] text-ink-soft/70">
-              {formatRelative(conversation.updatedAt)}
-            </span>
+            <span className="text-[10px] text-ink-soft/70">{formatRelative(conversation.updatedAt)}</span>
           </span>
         </button>
       )}
 
-      {/* Delete button — shown on hover */}
-      <button
-        type="button"
-        onClick={handleDelete}
-        className="mr-1 mt-2 hidden h-5 w-5 shrink-0 items-center justify-center rounded text-ink-soft hover:bg-danger/20 hover:text-danger group-hover:flex"
-        title="Delete conversation"
-      >
-        ×
-      </button>
+      {!editing ? (
+        <div className="mr-1 mt-1.5 flex shrink-0 items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100">
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setEditing(true);
+            }}
+            className="flex h-6 w-6 items-center justify-center rounded text-ink-soft hover:bg-surface-3 hover:text-ink"
+            title="Rename conversation"
+            aria-label="Rename conversation"
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={(event) => {
+              void handleDelete(event);
+            }}
+            className="flex h-6 w-6 items-center justify-center rounded text-ink-soft hover:bg-danger/20 hover:text-danger"
+            title="Delete conversation"
+            aria-label="Delete conversation"
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 6h18" />
+              <path d="M8 6V4h8v2" />
+              <path d="M19 6l-1 14H6L5 6" />
+              <path d="M10 11v6" />
+              <path d="M14 11v6" />
+            </svg>
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,10 +1,10 @@
-# Pi Agent Isolated Sandbox Chatbot
+# Smart Pi Assistant
 
 This project implements an agentic chat system with a strict control-plane / execution-plane split:
 
 - Control plane: React UI + Convex state and orchestration.
 - Execution plane: one isolated Daytona sandbox per conversation.
-- Agent runtime: long-lived Pi Agent daemon inside each sandbox, using Gemini (`gemini-2.5-flash`).
+- Agent runtime: long-lived Pi daemon inside each sandbox, using Gemini (`gemini-2.5-flash`).
 - Conversation-scoped file lifecycle: user upload to sandbox, agent-exported downloadable artifacts, and full file history.
 
 The goal is to satisfy the assignment requirement that the agent executes inside an isolated VM while preserving good observability (timeline, tool history, run state, and raw events).

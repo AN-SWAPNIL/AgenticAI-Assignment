@@ -49,6 +49,7 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_status", ["status"])
+    .index("by_status_and_lastHeartbeatAt", ["status", "lastHeartbeatAt"])
     .index("by_updatedAt", ["updatedAt"]),
 
   /**
