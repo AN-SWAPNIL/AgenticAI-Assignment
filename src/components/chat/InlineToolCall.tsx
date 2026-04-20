@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { compactJson, formatDuration, prettyJson } from "../../lib/formatters";
 import type { ToolExecution } from "../../types";
 
@@ -19,9 +19,18 @@ const STATUS_TONE: Record<ToolExecution["status"], string> = {
   error: "bg-danger/20 text-danger",
 };
 
+const BASH_TOOLS = new Set(["bash", "shell", "exec"]);
+
 export function InlineToolCall({ execution }: InlineToolCallProps) {
   const [expanded, setExpanded] = useState(false);
   const compactInput = compactJson(execution.inputJson, 70);
+  const isBash = BASH_TOOLS.has(execution.toolName.toLowerCase());
+  const isRunning = execution.status === "running";
+
+  // Auto-expand bash tools while running so output streams visibly
+  useEffect(() => {
+    if (isBash && isRunning) setExpanded(true);
+  }, [isBash, isRunning]);
 
   return (
     <div className="my-2 rounded-md border border-border bg-surface-1 text-[13px]">
@@ -34,6 +43,7 @@ export function InlineToolCall({ execution }: InlineToolCallProps) {
           className={clsx(
             "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[12px]",
             STATUS_TONE[execution.status],
+            isRunning && "animate-pulse",
           )}
         >
           {STATUS_ICON[execution.status]}
@@ -47,24 +57,28 @@ export function InlineToolCall({ execution }: InlineToolCallProps) {
         <span className="shrink-0 text-[11px] text-ink-soft">
           {formatDuration(execution.durationMs)}
         </span>
-        <span className="shrink-0 text-[11px] text-ink-soft">
-          {expanded ? "▴" : "▾"}
-        </span>
+        <span className="shrink-0 text-[11px] text-ink-soft">{expanded ? "▴" : "▾"}</span>
       </button>
+
       {expanded && (
         <div className="space-y-2 border-t border-border px-3 py-2">
           <Section label="Input">
-            <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink">
-              {prettyJson(execution.inputJson)}
-            </pre>
+            <ColorizedJson raw={execution.inputJson} />
           </Section>
-          {execution.outputText && (
+
+          {/* Bash streaming output: terminal aesthetic */}
+          {isBash && (execution.outputText || isRunning) ? (
+            <Section label="Output">
+              <TerminalOutput text={execution.outputText ?? ""} running={isRunning} />
+            </Section>
+          ) : execution.outputText ? (
             <Section label="Output">
               <pre className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-ink-muted">
                 {tryPretty(execution.outputText)}
               </pre>
             </Section>
-          )}
+          ) : null}
+
           {execution.errorText && (
             <Section label="Error">
               <pre className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-danger">
@@ -75,6 +89,46 @@ export function InlineToolCall({ execution }: InlineToolCallProps) {
         </div>
       )}
     </div>
+  );
+}
+
+function TerminalOutput({ text, running }: { text: string; running: boolean }) {
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (running) endRef.current?.scrollIntoView({ block: "nearest" });
+  }, [text, running]);
+
+  return (
+    <div className="relative max-h-64 overflow-auto rounded-md bg-black/85 p-3">
+      <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-green-400">
+        {text || " "}
+        {running && (
+          <span className="inline-block h-[11px] w-[6px] animate-blink bg-green-400 align-middle ml-0.5" />
+        )}
+      </pre>
+      <div ref={endRef} />
+    </div>
+  );
+}
+
+function ColorizedJson({ raw }: { raw: string }) {
+  const pretty = prettyJson(raw);
+  // Simple token colorization: keys, strings, numbers, booleans/null
+  const html = pretty
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/("(?:[^"\\]|\\.)*")(\s*:)/g, '<span class="text-blue-400">$1</span>$2')
+    .replace(/:\s*("(?:[^"\\]|\\.)*")/g, ': <span class="text-green-400">$1</span>')
+    .replace(/:\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g, ': <span class="text-orange-400">$1</span>')
+    .replace(/:\s*(true|false|null)/g, ': <span class="text-purple-400">$1</span>');
+
+  return (
+    <pre
+      className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink"
+      // eslint-disable-next-line react/no-danger
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
 }
 

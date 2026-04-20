@@ -15,9 +15,12 @@ export interface ToolRuntimeOptions {
   onQueueFileExport?: (args: { path: string; displayName?: string }) => Promise<{
     sessionFileId: string;
   }>;
+  /** Called with each bash stdout/stderr chunk for live streaming to Convex. */
+  onBashChunk?: (toolCallId: string, chunk: string) => void;
 }
 
 export function createTools(opts: ToolRuntimeOptions) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tools: Array<{
     name: string;
     label: string;
@@ -25,7 +28,7 @@ export function createTools(opts: ToolRuntimeOptions) {
     parameters: unknown;
     execute: (id: string, params: any) => Promise<any>;
   }> = [
-    createBashTool(opts.workspace),
+    createBashTool(opts.workspace, { onChunk: opts.onBashChunk }),
     createReadTool(opts.workspace),
     createWriteTool(opts.workspace),
     createEditTool(opts.workspace),

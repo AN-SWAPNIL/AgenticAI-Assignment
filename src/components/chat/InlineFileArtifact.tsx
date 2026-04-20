@@ -22,7 +22,13 @@ export function InlineFileArtifact({ file }: InlineFileArtifactProps) {
   const handleDownload = async () => {
     if (!file.downloadUrl) return;
     await markDownloaded({ sessionFileId: file._id });
-    window.open(file.downloadUrl, "_blank", "noopener,noreferrer");
+    const res = await fetch(file.downloadUrl);
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = file.displayName ?? "download";
+    a.click();
+    URL.revokeObjectURL(a.href);
   };
 
   return (

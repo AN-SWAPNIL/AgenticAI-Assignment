@@ -1,7 +1,14 @@
 import { v } from "convex/values";
 import { api } from "./_generated/api";
 import { type Doc, type Id } from "./_generated/dataModel";
-import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import {
+  internalMutation,
+  internalQuery,
+  mutation,
+  query,
+  type MutationCtx,
+  type QueryCtx,
+} from "./_generated/server";
 import {
   defaultConversationTitle,
   deriveAutoTitleFromUserMessage,
@@ -12,6 +19,26 @@ import {
  * Public API for the control plane. The UI calls only these queries + mutations.
  * All writes that originate from the in-VM daemon go through convex/ingest.ts.
  */
+
+// ─── shared helpers ──────────────────────────────────────────────────────────
+
+type SessionFileView = Doc<"sessionFiles"> & { downloadUrl: string | null };
+
+/** Resolve session file IDs to enriched records with signed download URLs. */
+async function resolveSessionFiles(
+  ctx: QueryCtx | MutationCtx,
+  ids: Id<"sessionFiles">[],
+): Promise<SessionFileView[]> {
+  const results = await Promise.all(
+    ids.map(async (id) => {
+      const sf = await ctx.db.get(id);
+      if (!sf) return null;
+      const downloadUrl = sf.storageId ? await ctx.storage.getUrl(sf.storageId) : null;
+      return { ...sf, downloadUrl } as SessionFileView;
+    }),
+  );
+  return results.filter((r): r is SessionFileView => r !== null);
+}
 
 // ─── queries ────────────────────────────────────────────────────────────────
 
@@ -35,13 +62,36 @@ export const get = query({
   },
 });
 
+export type MessageView = Doc<"messages"> & { sessionFiles: SessionFileView[] };
+
+const enrichMessage = async (ctx: QueryCtx | MutationCtx, m: Doc<"messages">): Promise<MessageView> => ({
+  ...m,
+  sessionFiles: m.sessionFileIds ? await resolveSessionFiles(ctx, m.sessionFileIds) : [],
+});
+
 export const messages = query({
   args: { conversationId: v.id("conversations") },
-  handler: async (ctx, { conversationId }): Promise<Doc<"messages">[]> => {
-    return ctx.db
+  handler: async (ctx, { conversationId }): Promise<MessageView[]> => {
+    const rows = await ctx.db
       .query("messages")
       .withIndex("by_conversation_order", (q) => q.eq("conversationId", conversationId))
-      .collect();
+      .take(500);
+    return Promise.all(rows.map((m) => enrichMessage(ctx, m)));
+  },
+});
+
+/** Full-text search within a conversation's messages. */
+export const searchMessages = query({
+  args: { conversationId: v.id("conversations"), q: v.string() },
+  handler: async (ctx, { conversationId, q }): Promise<MessageView[]> => {
+    if (!q.trim()) return [];
+    const rows = await ctx.db
+      .query("messages")
+      .withSearchIndex("search_content", (s) =>
+        s.search("content", q).eq("conversationId", conversationId),
+      )
+      .take(20);
+    return Promise.all(rows.map((m) => enrichMessage(ctx, m)));
   },
 });
 
@@ -125,8 +175,11 @@ export const timelineEvents = query({
 // ─── user-facing mutations ──────────────────────────────────────────────────
 
 export const create = mutation({
-  args: { title: v.optional(v.string()) },
-  handler: async (ctx, { title }): Promise<{ conversationId: Id<"conversations"> }> => {
+  args: {
+    title: v.optional(v.string()),
+    modelId: v.optional(v.string()),
+  },
+  handler: async (ctx, { title, modelId }): Promise<{ conversationId: Id<"conversations"> }> => {
     const now = Date.now();
     const cleanedTitle = title?.trim();
     const conversationId = await ctx.db.insert("conversations", {
@@ -134,11 +187,31 @@ export const create = mutation({
       titleMode: cleanedTitle ? "manual" : "default",
       status: "provisioning",
       agentToken: generateToken(),
+      modelId: modelId?.trim() || undefined,
       createdAt: now,
       updatedAt: now,
     });
     // Client immediately calls orchestrator.provisionConversation to kick off the VM.
     return { conversationId };
+  },
+});
+
+/** Update the LLM model for a conversation. Takes effect on the next run. */
+export const setModel = mutation({
+  args: { conversationId: v.id("conversations"), modelId: v.string() },
+  handler: async (ctx, { conversationId, modelId }) => {
+    const row = await ctx.db.get(conversationId);
+    if (!row || row.status === "deleted") throw new Error("Conversation not found");
+    await ctx.db.patch(conversationId, { modelId: modelId.trim() || undefined, updatedAt: Date.now() });
+  },
+});
+
+export const setThinkingLevel = mutation({
+  args: { conversationId: v.id("conversations"), thinkingLevel: v.string() },
+  handler: async (ctx, { conversationId, thinkingLevel }) => {
+    const row = await ctx.db.get(conversationId);
+    if (!row || row.status === "deleted") throw new Error("Conversation not found");
+    await ctx.db.patch(conversationId, { thinkingLevel: thinkingLevel.trim() || undefined, updatedAt: Date.now() });
   },
 });
 
@@ -158,13 +231,17 @@ export const rename = mutation({
  * its subscription to ingest.nextQueuedRun — no action call needed from the control plane.
  */
 export const sendMessage = mutation({
-  args: { conversationId: v.id("conversations"), content: v.string() },
+  args: {
+    conversationId: v.id("conversations"),
+    content: v.string(),
+    sessionFileIds: v.optional(v.array(v.id("sessionFiles"))),
+  },
   handler: async (
     ctx,
-    { conversationId, content },
+    { conversationId, content, sessionFileIds },
   ): Promise<{ runId: Id<"runs">; userMessageId: Id<"messages"> }> => {
     const trimmed = content.trim();
-    if (!trimmed) {
+    if (!trimmed && (!sessionFileIds || sessionFileIds.length === 0)) {
       throw new Error("Message cannot be empty");
     }
     const conversation = await ctx.db.get(conversationId);
@@ -175,7 +252,7 @@ export const sendMessage = mutation({
     const priorMessages = await ctx.db
       .query("messages")
       .withIndex("by_conversation_order", (q) => q.eq("conversationId", conversationId))
-      .collect();
+      .take(500);
     const nextOrder = priorMessages.length;
 
     const now = Date.now();
@@ -184,10 +261,11 @@ export const sendMessage = mutation({
     const userMessageId = await ctx.db.insert("messages", {
       conversationId,
       role: "user",
-      content: trimmed,
+      content: trimmed || "(file)",
       status: "completed",
       order: nextOrder,
       createdAt: now,
+      sessionFileIds: sessionFileIds && sessionFileIds.length > 0 ? sessionFileIds : undefined,
     });
 
     const runId = await ctx.db.insert("runs", {
@@ -234,11 +312,15 @@ export const remove = mutation({
 });
 
 /**
- * UI-triggered daemon revival. Used when the heartbeat has been stale for too long.
+ * UI-triggered daemon revival. Forces re-launch regardless of heartbeat freshness.
+ * Handles both stale heartbeat and explicit "error" status conversations.
  */
 export const revive = mutation({
   args: { conversationId: v.id("conversations") },
   handler: async (ctx, { conversationId }) => {
+    const row = await ctx.db.get(conversationId);
+    if (!row || row.status === "deleted") return;
+    // Allow reviving from any non-deleted state (error, idle with stale heartbeat, running stuck)
     await ctx.scheduler.runAfter(0, api.orchestrator.reviveDaemonIfDead, {
       conversationId,
     });
@@ -262,6 +344,19 @@ export const rawForOrchestrator = internalQuery({
   },
 });
 
+/** Internal query used by the sweeper to find the current in-flight run. */
+export const activeRun = internalQuery({
+  args: { conversationId: v.id("conversations") },
+  handler: async (ctx, { conversationId }): Promise<Doc<"runs"> | null> => {
+    return ctx.db
+      .query("runs")
+      .withIndex("by_conv_status", (q) =>
+        q.eq("conversationId", conversationId).eq("status", "running"),
+      )
+      .first();
+  },
+});
+
 export const patchForOrchestrator = internalMutation({
   args: {
     conversationId: v.id("conversations"),
@@ -281,6 +376,7 @@ export const patchForOrchestrator = internalMutation({
       runtimeDir: v.optional(v.string()),
       runtimeVersion: v.optional(v.string()),
       lastError: v.optional(v.string()),
+      volumeName: v.optional(v.string()),
     }),
   },
   handler: async (ctx, { conversationId, patch }) => {

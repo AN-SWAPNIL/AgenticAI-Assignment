@@ -33,27 +33,39 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(
     const messages = active.messages ?? [];
     const tools = active.conversationToolExecutions ?? [];
     const sessionFiles = active.sessionFiles ?? [];
-    const errorActive = conversation?.status === "error";
+    const status = conversation?.status;
+    const errorActive = status === "error";
+    const provisioningStuck = status === "provisioning";
+    const canRevive = errorActive || provisioningStuck;
 
     return (
       <div className="flex h-full min-h-0 flex-col">
-        {errorActive && (
-          <div className="flex items-center justify-between gap-3 border-b border-danger/40 bg-danger/10 px-6 py-2 text-sm text-danger">
-            <span>
-              Daemon reported an error
-              {conversation?.lastError ? `: ${conversation.lastError}` : ""}.
-            </span>
+        {canRevive && (
+          <div className="flex items-center justify-between gap-3 border-b border-danger/30 bg-danger/8 px-5 py-2.5">
+            <div className="flex items-center gap-2">
+              <span className="text-base">⚠️</span>
+              <div>
+                <p className="text-[13px] font-medium text-danger">
+                  {provisioningStuck ? "Sandbox stuck provisioning" : "Daemon stopped"}
+                </p>
+                {conversation?.lastError && (
+                  <p className="text-[11px] text-danger/70">{conversation.lastError}</p>
+                )}
+              </div>
+            </div>
             <button
               type="button"
-              onClick={() => revive({ conversationId })}
-              className="rounded-md border border-danger/60 px-3 py-1 text-xs font-medium hover:bg-danger hover:text-surface-0"
+              onClick={() => void revive({ conversationId })}
+              className="shrink-0 rounded-lg border border-danger/50 bg-danger/10 px-3 py-1.5 text-[12px] font-medium text-danger hover:bg-danger hover:text-surface-0 transition-colors"
             >
-              Revive daemon
+              Revive
             </button>
           </div>
         )}
 
+
         <MessageList
+          conversationId={conversationId}
           messages={messages}
           toolExecutions={tools}
           sessionFiles={sessionFiles}
@@ -62,6 +74,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(
           ref={composerRef}
           conversationId={conversationId}
           conversationStatus={conversation?.status}
+          activeRun={active.latestRun}
         />
       </div>
     );

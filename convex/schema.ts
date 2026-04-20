@@ -37,6 +37,14 @@ export default defineSchema({
     /** Unix ms of the last heartbeat from the daemon. Used by reviveDaemonIfDead and the orphan sweeper. */
     lastHeartbeatAt: v.optional(v.number()),
     lastError: v.optional(v.string()),
+    /** Per-conversation LLM model override (e.g. "gemini-2.5-pro"). Falls back to env default. */
+    modelId: v.optional(v.string()),
+    /** Thinking/reasoning budget: "off" | "low" | "medium" | "high". Default "off". */
+    thinkingLevel: v.optional(v.string()),
+    /** Rolling summary of older conversation turns for long-context memory (RAG). */
+    summaryContext: v.optional(v.string()),
+    /** Daytona volume name for persistent workspace across sandbox restarts. */
+    volumeName: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -46,6 +54,7 @@ export default defineSchema({
   /**
    * Ordered per-conversation transcript. Assistant messages stream in: status transitions
    * pending → streaming → completed as the daemon appends deltas and finalizes.
+   * User messages may carry attachmentIds: storage references for images sent to the LLM.
    */
   messages: defineTable({
     conversationId: v.id("conversations"),
@@ -60,7 +69,16 @@ export default defineSchema({
     ),
     order: v.number(),
     createdAt: v.number(),
-  }).index("by_conversation_order", ["conversationId", "order"]),
+    /** Session file IDs for files attached to user messages. Resolved to rich metadata + URLs on read. */
+    sessionFileIds: v.optional(v.array(v.id("sessionFiles"))),
+    /** Extended thinking / reasoning content produced by the model before the final response. */
+    thinkingContent: v.optional(v.string()),
+  })
+    .index("by_conversation_order", ["conversationId", "order"])
+    .searchIndex("search_content", {
+      searchField: "content",
+      filterFields: ["conversationId"],
+    }),
 
   /**
    * One row per user turn. The user inserts it via sendMessage (status: "queued"); the daemon

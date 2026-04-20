@@ -1,93 +1,313 @@
 import clsx from "clsx";
+import { useEffect, useRef, useState } from "react";
 import { Markdown } from "../../lib/markdown";
-import type { Message, SessionFileView, ToolExecution } from "../../types";
+import { formatChatTime, formatDuration } from "../../lib/formatters";
+import type { MessageView, SessionFileView, ToolExecution } from "../../types";
 import { InlineFileArtifact } from "./InlineFileArtifact";
 import { InlineToolCall } from "./InlineToolCall";
 
 interface MessageBubbleProps {
-  message: Message;
+  message: MessageView;
   toolExecutions: ToolExecution[];
   fileArtifacts: SessionFileView[];
 }
 
-/**
- * Renders a single chat bubble. For assistant messages we interleave any tool calls that
- * happened during this run *after* the text — the simplest faithful presentation given the
- * agent emits text deltas and tool calls without strong ordering hints.
- */
 export function MessageBubble({ message, toolExecutions, fileArtifacts }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isStreaming = message.status === "streaming" || message.status === "pending";
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const [showTime, setShowTime] = useState(false);
 
   return (
-    <div className={clsx("flex w-full gap-3", isUser ? "justify-end" : "justify-start")}>
-      {!isUser && <Avatar role={message.role} />}
+    <>
       <div
-        className={clsx(
-          "flex max-w-[88%] flex-col gap-1 rounded-2xl px-4 py-3",
-          isUser
-            ? "bg-accent text-surface-0"
-            : "border border-border bg-surface-1 text-ink",
-        )}
+        className={clsx("group flex w-full gap-3", isUser ? "justify-end" : "justify-start")}
+        onMouseEnter={() => setShowTime(true)}
+        onMouseLeave={() => setShowTime(false)}
       >
-        {message.content.length > 0 ? (
-          isUser ? (
-            <p className="whitespace-pre-wrap text-[15px] leading-relaxed">
-              {message.content}
-            </p>
-          ) : (
-            <Markdown>{message.content}</Markdown>
-          )
-        ) : (
-          !isUser && (
-            <p className="text-sm italic text-ink-soft">
-              {message.status === "error" ? "(no response)" : "Thinking…"}
-            </p>
-          )
-        )}
+        {!isUser && <Avatar role={message.role} />}
 
-        {!isUser && isStreaming && (
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <div
+            className={clsx(
+              "flex max-w-[88%] flex-col gap-1 rounded-2xl px-4 py-3",
+              isUser
+                ? "bg-accent text-surface-0 rounded-tr-sm"
+                : "border border-border bg-surface-1 text-ink rounded-tl-sm",
+            )}
+          >
+            {/* User-attached files shown above text */}
+            {isUser && message.sessionFiles.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {message.sessionFiles.map((sf) =>
+                  sf.contentType?.startsWith("image/") && sf.downloadUrl ? (
+                    <button
+                      key={sf._id}
+                      type="button"
+                      onClick={() => setLightboxUrl(sf.downloadUrl!)}
+                      className="overflow-hidden rounded-xl border border-white/20 transition-opacity hover:opacity-90"
+                    >
+                      <img
+                        src={sf.downloadUrl}
+                        alt={sf.displayName}
+                        className="max-h-52 max-w-xs object-contain"
+                      />
+                    </button>
+                  ) : (
+                    <FileChip key={sf._id} file={sf} light />
+                  ),
+                )}
+              </div>
+            )}
+
+            {/* Thinking block — collapsible, shown before response text */}
+            {!isUser && message.thinkingContent && (
+              <ThinkingBlock content={message.thinkingContent} />
+            )}
+
+            {/* Message text */}
+            {message.content.length > 0 && message.content !== "(file)" ? (
+              isUser ? (
+                <p className="whitespace-pre-wrap text-[15px] leading-relaxed">{message.content}</p>
+              ) : (
+                <Markdown>{message.content}</Markdown>
+              )
+            ) : (
+              !isUser && (
+                <p className="text-sm italic text-ink-soft">
+                  {message.status === "error" ? "(no response)" : "Thinking…"}
+                </p>
+              )
+            )}
+
+            {/* Streaming cursor */}
+            {!isUser && isStreaming && (
+              <span aria-hidden className="inline-block h-3 w-[5px] animate-blink bg-accent" />
+            )}
+
+            {/* Agent-downloaded file artifacts */}
+            {!isUser && fileArtifacts.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {fileArtifacts.map((file) => (
+                  <InlineFileArtifact key={file._id} file={file} />
+                ))}
+              </div>
+            )}
+
+            {/* Tool calls — collapsed group */}
+            {!isUser && toolExecutions.length > 0 && (
+              <ToolCallsGroup executions={toolExecutions} isRunning={isStreaming} />
+            )}
+          </div>
+
+          {/* Timestamp — visible on hover */}
           <span
-            aria-hidden
-            className="inline-block h-3 w-[6px] animate-blink bg-accent"
-          />
-        )}
+            className={clsx(
+              "text-[10px] text-ink-soft/60 transition-opacity duration-150 px-1",
+              isUser ? "text-right" : "text-left",
+              showTime ? "opacity-100" : "opacity-0",
+            )}
+          >
+            {formatChatTime(message.createdAt)}
+          </span>
+        </div>
 
-        {!isUser && toolExecutions.length > 0 && (
-          <div className="mt-2">
-            {toolExecutions.map((tool) => (
-              <InlineToolCall key={tool._id} execution={tool} />
-            ))}
-          </div>
-        )}
-
-        {!isUser && fileArtifacts.length > 0 && (
-          <div className="mt-2">
-            {fileArtifacts.map((file) => (
-              <InlineFileArtifact key={file._id} file={file} />
-            ))}
-          </div>
-        )}
+        {isUser && <Avatar role={message.role} />}
       </div>
-      {isUser && <Avatar role={message.role} />}
+
+      {lightboxUrl && <ImageLightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
+    </>
+  );
+}
+
+// ─── Tool calls group ────────────────────────────────────────────────────────
+
+function ToolCallsGroup({
+  executions,
+  isRunning,
+}: {
+  executions: ToolExecution[];
+  isRunning: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const totalMs = executions.reduce((s, e) => s + (e.durationMs ?? 0), 0);
+  const uniqueNames = [...new Set(executions.map((e) => e.toolName))];
+  const namesSummary = uniqueNames.slice(0, 3).join(", ") + (uniqueNames.length > 3 ? "…" : "");
+
+  // Auto-open while actively running so streaming bash output is visible
+  useEffect(() => {
+    if (isRunning) setOpen(true);
+  }, [isRunning]);
+
+  return (
+    <div className="mt-2 rounded-lg border border-border/60 bg-surface-0/50 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-ink-soft hover:bg-surface-2/50 transition-colors"
+      >
+        <span className={clsx("text-[11px]", isRunning && "animate-pulse text-warning")}>
+          {isRunning ? "⋯" : open ? "▾" : "▸"}
+        </span>
+        <span className="font-medium text-ink">
+          {executions.length} tool call{executions.length !== 1 ? "s" : ""}
+        </span>
+        {!isRunning && (
+          <>
+            <span className="text-ink-soft/40">·</span>
+            <span className="min-w-0 flex-1 truncate">{namesSummary}</span>
+            <span className="shrink-0 font-mono text-[10px]">{formatDuration(totalMs)}</span>
+          </>
+        )}
+        {isRunning && (
+          <span className="animate-pulse text-warning">Running…</span>
+        )}
+      </button>
+      {open && (
+        <div className="border-t border-border/40 px-2 pb-2 pt-1">
+          {executions.map((e) => (
+            <InlineToolCall key={e._id} execution={e} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function Avatar({ role }: { role: Message["role"] }) {
-  const label = role === "user" ? "You" : role === "assistant" ? "Pi" : "Sys";
+// ─── Thinking block ──────────────────────────────────────────────────────────
+
+function ThinkingBlock({ content }: { content: string }) {
+  const [open, setOpen] = useState(false);
+  const lines = content.trim().split("\n").length;
+
+  return (
+    <div className="mb-2 rounded-lg border border-border/50 bg-surface-0/60 overflow-hidden text-[12px]">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-ink-soft hover:bg-surface-2/50 transition-colors"
+      >
+        <span className="text-[11px]">{open ? "▾" : "▸"}</span>
+        <span className="italic">Thought for {lines} line{lines !== 1 ? "s" : ""}</span>
+        <span className="ml-auto text-[10px] text-ink-soft/50">click to {open ? "collapse" : "expand"}</span>
+      </button>
+      {open && (
+        <pre className="border-t border-border/40 px-3 py-2 font-mono text-[11px] text-ink-muted whitespace-pre-wrap overflow-auto max-h-96 leading-relaxed">
+          {content.trim()}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ─── File chip (non-image attachments on user messages) ─────────────────────
+
+function FileChip({ file, light }: { file: SessionFileView; light?: boolean }) {
+  const handleDownload = async () => {
+    if (!file.downloadUrl) return;
+    const res = await fetch(file.downloadUrl);
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = file.displayName ?? "download";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  if (file.downloadUrl) {
+    return (
+      <button
+        type="button"
+        onClick={() => void handleDownload()}
+        className={clsx(
+          "flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[12px] transition-colors",
+          light
+            ? "border-white/20 bg-white/10 text-surface-0 hover:bg-white/20"
+            : "border-border bg-surface-0 text-ink hover:bg-surface-2",
+        )}
+      >
+        <span>{fileIcon(file.contentType)}</span>
+        <span className="max-w-[120px] truncate">{file.displayName}</span>
+        <span className="text-[10px] opacity-60">↓</span>
+      </button>
+    );
+  }
   return (
     <div
       className={clsx(
-        "flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold",
-        role === "user"
-          ? "bg-accent-soft text-ink"
-          : role === "assistant"
-            ? "bg-surface-3 text-ink"
-            : "bg-warning text-surface-0",
+        "flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[12px]",
+        light
+          ? "border-white/20 bg-white/10 text-surface-0"
+          : "border-border bg-surface-0 text-ink",
       )}
     >
-      {label}
+      <span>{fileIcon(file.contentType)}</span>
+      <span className="max-w-[120px] truncate">{file.displayName}</span>
+    </div>
+  );
+}
+
+function fileIcon(contentType: string | undefined): string {
+  if (!contentType) return "📎";
+  if (contentType.startsWith("image/")) return "🖼";
+  if (contentType.startsWith("video/")) return "🎬";
+  if (contentType.startsWith("audio/")) return "🎵";
+  if (contentType.includes("pdf")) return "📄";
+  if (contentType.includes("zip") || contentType.includes("archive")) return "📦";
+  if (contentType.startsWith("text/") || contentType.includes("json")) return "📝";
+  return "📎";
+}
+
+// ─── Lightbox ────────────────────────────────────────────────────────────────
+
+function ImageLightbox({ url, onClose }: { url: string; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    dialog.showModal();
+    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
+  return (
+    <dialog
+      ref={dialogRef}
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      className="fixed inset-0 m-auto max-h-[92vh] max-w-[92vw] rounded-2xl border border-border bg-surface-0 p-2 shadow-2xl backdrop:bg-black/70"
+    >
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute right-3 top-3 z-10 flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-sm text-ink hover:bg-surface-3"
+      >
+        ✕
+      </button>
+      <img
+        src={url}
+        alt="attachment"
+        className="max-h-[88vh] max-w-[88vw] rounded-xl object-contain"
+      />
+    </dialog>
+  );
+}
+
+// ─── Avatar ───────────────────────────────────────────────────────────────────
+
+function Avatar({ role }: { role: MessageView["role"] }) {
+  if (role === "user") return null; // user has no left-side avatar; placed on right via layout
+  if (role === "assistant") {
+    return (
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent/60 text-[11px] font-bold text-surface-0 shadow-sm">
+        π
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-warning text-[10px] font-semibold text-surface-0">
+      SYS
     </div>
   );
 }

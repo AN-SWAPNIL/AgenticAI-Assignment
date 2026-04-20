@@ -2,7 +2,7 @@ import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type {
   ConversationId,
-  Message,
+  MessageView,
   Run,
   SessionFileView,
   TimelineEvent,
@@ -11,7 +11,7 @@ import type {
 
 export interface ActiveRunData {
   conversation: ReturnType<typeof useQuery<typeof api.conversations.get>>;
-  messages: Message[] | undefined;
+  messages: MessageView[] | undefined;
   latestRun: Run | undefined | null;
   observabilityRun: Run | undefined | null;
   toolExecutions: ToolExecution[] | undefined;
@@ -32,7 +32,7 @@ export function useActiveRun(conversationId: ConversationId | null): ActiveRunDa
   const messages = useQuery(
     api.conversations.messages,
     conversationId ? { conversationId } : "skip",
-  );
+  ) as MessageView[] | undefined;
   const latestRun = useQuery(
     api.conversations.latestRun,
     conversationId ? { conversationId } : "skip",

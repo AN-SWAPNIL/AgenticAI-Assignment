@@ -49,56 +49,68 @@ export function ConversationItem({
   };
 
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(conversation._id)}
-      onDoubleClick={(e) => {
-        e.preventDefault();
-        setEditing(true);
-      }}
+    <div
       className={clsx(
-        "group flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition",
+        "group flex w-full items-start gap-1 rounded-lg transition-colors",
         selected
-          ? "bg-surface-3 text-ink"
-          : "text-ink-muted hover:bg-surface-2 hover:text-ink",
+          ? "bg-accent/10 ring-1 ring-accent/20"
+          : "hover:bg-surface-2",
       )}
     >
-      <span
-        className={clsx("h-2 w-2 shrink-0 rounded-full", STATUS_DOT[conversation.status])}
-        title={conversation.status}
-      />
-      <span className="min-w-0 flex-1 truncate">
-        {editing ? (
+      {/* Main select area — plain div when editing to avoid nesting input inside button */}
+      {editing ? (
+        <div className="flex min-w-0 flex-1 items-start gap-2.5 px-3 py-2.5">
+          <span
+            className={clsx("mt-[5px] h-2 w-2 shrink-0 rounded-full", STATUS_DOT[conversation.status])}
+            title={conversation.status}
+          />
           <input
             value={draft}
+            aria-label="Conversation title"
             onChange={(e) => setDraft(e.target.value)}
             onBlur={commitRename}
             onKeyDown={(e) => {
               if (e.key === "Enter") commitRename();
-              if (e.key === "Escape") {
-                setEditing(false);
-                setDraft(conversation.title);
-              }
+              if (e.key === "Escape") { setEditing(false); setDraft(conversation.title); }
             }}
             autoFocus
-            className="w-full rounded border border-border bg-surface-0 px-1 py-[2px] text-sm text-ink"
+            className="min-w-0 flex-1 rounded border border-border bg-surface-0 px-1 py-[2px] text-sm text-ink"
           />
-        ) : (
-          conversation.title
-        )}
-      </span>
-      <span className="shrink-0 text-[10px] text-ink-soft">
-        {formatRelative(conversation.updatedAt)}
-      </span>
-      <span
-        role="button"
-        tabIndex={-1}
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => onSelect(conversation._id)}
+          onDoubleClick={(e) => { e.preventDefault(); setEditing(true); }}
+          className={clsx(
+            "flex min-w-0 flex-1 items-start gap-2.5 px-3 py-2.5 text-left",
+            selected ? "text-ink" : "text-ink-muted hover:text-ink",
+          )}
+        >
+          <span
+            className={clsx("mt-[5px] h-2 w-2 shrink-0 rounded-full", STATUS_DOT[conversation.status])}
+            title={conversation.status}
+          />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[13px] font-medium leading-snug">
+              {conversation.title}
+            </span>
+            <span className="text-[10px] text-ink-soft/70">
+              {formatRelative(conversation.updatedAt)}
+            </span>
+          </span>
+        </button>
+      )}
+
+      {/* Delete button — shown on hover */}
+      <button
+        type="button"
         onClick={handleDelete}
-        className="hidden h-5 w-5 shrink-0 items-center justify-center rounded text-ink-soft hover:bg-danger hover:text-surface-0 group-hover:flex"
-        title="Delete"
+        className="mr-1 mt-2 hidden h-5 w-5 shrink-0 items-center justify-center rounded text-ink-soft hover:bg-danger/20 hover:text-danger group-hover:flex"
+        title="Delete conversation"
       >
         ×
-      </span>
-    </button>
+      </button>
+    </div>
   );
 }

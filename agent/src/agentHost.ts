@@ -28,6 +28,8 @@ interface DaemonEnv {
   conversationId: string;
   agentToken: string;
   geminiApiKey: string;
+  anthropicApiKey?: string;
+  openAiApiKey?: string;
   tavilyApiKey?: string;
   workspaceDir: string;
   modelId: string;
@@ -55,6 +57,8 @@ function readEnv(): DaemonEnv {
     conversationId: get("CONVEX_CONVERSATION_ID"),
     agentToken: get("CONVEX_AGENT_TOKEN"),
     geminiApiKey: get("GEMINI_API_KEY"),
+    anthropicApiKey: optional("ANTHROPIC_API_KEY", "") || undefined,
+    openAiApiKey: optional("OPENAI_API_KEY", "") || undefined,
     tavilyApiKey: optional("TAVILY_API_KEY", "") || undefined,
     workspaceDir: optional("AGENT_WORKSPACE_DIR", "/home/daytona/workspace"),
     modelId: optional("AGENT_MODEL_ID", "gemini-2.5-flash"),
@@ -110,6 +114,8 @@ async function main(): Promise<void> {
             workspace,
             modelId: env.modelId,
             apiKey: env.geminiApiKey,
+            anthropicApiKey: env.anthropicApiKey,
+            openAiApiKey: env.openAiApiKey,
             tavilyApiKey: env.tavilyApiKey,
             thinkingLevel: env.thinkingLevel,
           },

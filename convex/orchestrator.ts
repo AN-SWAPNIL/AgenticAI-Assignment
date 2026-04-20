@@ -1,6 +1,7 @@
 "use node";
 
 import { Daytona, type Sandbox } from "@daytona/sdk";
+import { safeDeleteSandbox } from "./daytonaUtils";
 import { Buffer } from "node:buffer";
 import process from "node:process";
 import { v } from "convex/values";
@@ -108,9 +109,13 @@ async function execInSessionOrThrow(
 }
 
 /**
- * Upload the bundle, install deps, and launch the daemon as a detached background process.
- * Idempotent — safe to call again on revive: writeFile overwrites, npm ci is fast on cache,
- * launch command kills any prior pidfile-tracked process before starting fresh.
+ * Upload the bundle, optionally install deps, and launch the daemon as a detached background process.
+ *
+ * When DAYTONA_SNAPSHOT is set, deps are pre-installed in the snapshot image — we skip npm install
+ * to cut cold-start time from ~30s to ~5s. The bundle (agentHost.mjs) is always uploaded fresh
+ * because it changes with every code release.
+ *
+ * Idempotent — safe to call again on revive: writeFile overwrites, kill-by-pidfile cleans up prior daemon.
  */
 async function bootstrapDaemon(
   sandbox: Sandbox,
@@ -121,42 +126,54 @@ async function bootstrapDaemon(
     agentToken: string;
     geminiApiKey: string;
     tavilyApiKey?: string;
+    modelId?: string;
+    thinkingLevel?: string;
   },
 ): Promise<void> {
   await sandbox.fs.createFolder(RUNTIME_DIR, "755").catch(() => undefined);
   await sandbox.fs.createFolder(WORKSPACE_DIR, "755").catch(() => undefined);
+  await sandbox.fs.createFolder(`${WORKSPACE_DIR}/uploads`, "755").catch(() => undefined);
 
-  await sandbox.fs.uploadFile(
-    Buffer.from(AGENT_PACKAGE_JSON, "utf8"),
-    `${RUNTIME_DIR}/package.json`,
-  );
+  const hasSnapshot = !!process.env.DAYTONA_SNAPSHOT?.trim();
+
+  if (!hasSnapshot) {
+    // No snapshot: install deps from scratch (cold path).
+    await sandbox.fs.uploadFile(
+      Buffer.from(AGENT_PACKAGE_JSON, "utf8"),
+      `${RUNTIME_DIR}/package.json`,
+    );
+    await execOrThrow(
+      sandbox,
+      "npm install --omit=dev --silent --no-fund --no-audit",
+      RUNTIME_DIR,
+      BOOTSTRAP_TIMEOUT_SECONDS,
+    );
+  }
+
+  // Always upload the latest bundle (changes on every code release).
   await sandbox.fs.uploadFile(
     Buffer.from(AGENT_HOST_BUNDLE, "utf8"),
     `${RUNTIME_DIR}/agentHost.mjs`,
   );
 
-  await execOrThrow(
-    sandbox,
-    "npm install --omit=dev --silent --no-fund --no-audit",
-    RUNTIME_DIR,
-    BOOTSTRAP_TIMEOUT_SECONDS,
-  );
+  const defaultModel = process.env.AGENT_MODEL_ID?.trim() || "gemini-2.5-flash";
+  const modelId = env.modelId?.trim() || defaultModel;
 
   const envExports = [
     `export CONVEX_URL=${shellQuote(env.convexUrl)}`,
     `export CONVEX_CONVERSATION_ID=${shellQuote(env.conversationId)}`,
     `export CONVEX_AGENT_TOKEN=${shellQuote(env.agentToken)}`,
     `export GEMINI_API_KEY=${shellQuote(env.geminiApiKey)}`,
-    ...(env.tavilyApiKey
-      ? [`export TAVILY_API_KEY=${shellQuote(env.tavilyApiKey)}`]
-      : []),
+    ...(env.tavilyApiKey ? [`export TAVILY_API_KEY=${shellQuote(env.tavilyApiKey)}`] : []),
+    ...(process.env.ANTHROPIC_API_KEY ? [`export ANTHROPIC_API_KEY=${shellQuote(process.env.ANTHROPIC_API_KEY)}`] : []),
+    ...(process.env.OPENAI_API_KEY ? [`export OPENAI_API_KEY=${shellQuote(process.env.OPENAI_API_KEY)}`] : []),
     `export AGENT_WORKSPACE_DIR=${shellQuote(WORKSPACE_DIR)}`,
-    `export AGENT_MODEL_ID=${shellQuote("gemini-2.5-flash")}`,
+    `export AGENT_MODEL_ID=${shellQuote(modelId)}`,
+    `export AGENT_THINKING_LEVEL=${shellQuote(env.thinkingLevel || "off")}`,
   ].join("\n");
 
   const launchScript = [
     `cd ${shellQuote(RUNTIME_DIR)}`,
-    // Kill prior daemon (ignore failure — may not exist yet).
     `if [ -f host.pid ]; then kill "$(cat host.pid)" 2>/dev/null || true; sleep 1; fi`,
     envExports,
     `nohup node agentHost.mjs > host.log 2>&1 &`,
@@ -196,18 +213,26 @@ export const provisionConversation = action({
 
     try {
       const daytona = createDaytona();
-      const sandbox = await daytona.create({
-        language: "typescript",
-        autoStopInterval: AUTO_STOP_MINUTES,
-        labels: {
-          app: "agentic-assignment",
-          conversationId: String(conversationId),
-        },
-      });
+      const snapshotName = process.env.DAYTONA_SNAPSHOT?.trim();
 
-      const sessionId = sanitizeSessionId(
-        `daemon-${String(conversationId)}-${Date.now()}`,
-      );
+      const baseLabels = { app: "agentic-assignment", conversationId: String(conversationId) };
+      const fallbackParams = { language: "typescript" as const, autoStopInterval: AUTO_STOP_MINUTES, labels: baseLabels };
+
+      // Try snapshot first (faster cold start); fall back to language runtime if snapshot not found.
+      let sandbox: Awaited<ReturnType<typeof daytona.create>>;
+      if (snapshotName) {
+        try {
+          sandbox = await daytona.create({ snapshot: snapshotName, autoStopInterval: AUTO_STOP_MINUTES, labels: baseLabels });
+        } catch (snapshotErr) {
+          const msg = snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr);
+          console.warn(`[orchestrator] snapshot "${snapshotName}" failed (${msg}); falling back to language runtime`);
+          sandbox = await daytona.create(fallbackParams);
+        }
+      } else {
+        sandbox = await daytona.create(fallbackParams);
+      }
+
+      const sessionId = sanitizeSessionId(`daemon-${String(conversationId)}-${Date.now()}`);
       await ensureSession(sandbox, sessionId);
 
       await bootstrapDaemon(sandbox, sessionId, {
@@ -216,6 +241,8 @@ export const provisionConversation = action({
         agentToken: conversation.agentToken,
         geminiApiKey,
         tavilyApiKey,
+        modelId: conversation.modelId,
+        thinkingLevel: conversation.thinkingLevel,
       });
 
       await ctx.runMutation(internal.conversations.patchForOrchestrator, {
@@ -255,11 +282,15 @@ export const reviveDaemonIfDead = action({
     );
     if (!conversation) return { revived: false, reason: "not-found" };
     if (!conversation.sandboxId || !conversation.sessionId) {
-      return { revived: false, reason: "not-provisioned" };
+      // Provision failed originally (e.g. snapshot not found) — re-provision now.
+      await ctx.runAction(api.orchestrator.provisionConversation, { conversationId });
+      return { revived: true, reason: "re-provisioned" };
     }
 
+    // Allow revive from any state: explicit user action should always attempt re-launch.
+    // Exception: only skip if heartbeat is fresh AND status is idle (daemon genuinely alive).
     const fresh = Date.now() - (conversation.lastHeartbeatAt ?? 0) < STALE_HEARTBEAT_MS;
-    if (fresh) {
+    if (fresh && conversation.status === "idle") {
       return { revived: false, reason: "heartbeat-fresh" };
     }
 
@@ -270,7 +301,6 @@ export const reviveDaemonIfDead = action({
     try {
       const daytona = createDaytona();
       const sandbox = await daytona.get(conversation.sandboxId);
-      // Sandbox may have auto-stopped after 30min idle; start it back up.
       try {
         await sandbox.start();
       } catch {
@@ -283,6 +313,8 @@ export const reviveDaemonIfDead = action({
         agentToken: conversation.agentToken,
         geminiApiKey,
         tavilyApiKey,
+        modelId: conversation.modelId,
+        thinkingLevel: conversation.thinkingLevel,
       });
 
       await ctx.runMutation(internal.conversations.patchForOrchestrator, {
@@ -320,10 +352,10 @@ export const deleteConversationSandbox = action({
     try {
       const daytona = createDaytona();
       const sandbox = await daytona.get(sandboxId);
-      await daytona.delete(sandbox);
+      await safeDeleteSandbox(daytona, sandbox);
     } catch (err) {
-      // 404 is fine — sandbox may have been auto-cleaned. Anything else: log and let the
-      // sweeper retry on the next pass.
+      const status = (err as { statusCode?: number })?.statusCode;
+      if (status === 404) return; // already gone
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[orchestrator] delete sandbox ${sandboxId} failed:`, message);
     }

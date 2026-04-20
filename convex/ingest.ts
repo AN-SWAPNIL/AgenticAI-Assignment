@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { type Doc, type Id } from "./_generated/dataModel";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { fileBasename, sanitizeDisplayName, tokensMatch } from "./lib";
 
 /**
@@ -147,7 +147,14 @@ export const claimRun = mutation({
   handler: async (
     ctx,
     { conversationId, agentToken, runId },
-  ): Promise<{ runToken: string; userMessageContent: string } | null> => {
+  ): Promise<{
+    runToken: string;
+    modelId: string;
+    userMessageContent: string;
+    attachmentUrls: string[];
+    attachedFiles: Array<{ name: string; contentType: string; sandboxPath: string | null; status: string }>;
+    summaryContext: string | undefined;
+  } | null> => {
     await requireConversation(ctx, conversationId, agentToken);
     const run = await ctx.db.get(runId);
     if (!run || run.conversationId !== conversationId) {
@@ -162,6 +169,32 @@ export const claimRun = mutation({
       throw new Error("User message missing for run");
     }
 
+    // Resolve session files → image URLs for multimodal + metadata for all files.
+    const attachmentUrls: string[] = [];
+    const attachedFiles: Array<{ name: string; contentType: string; sandboxPath: string | null; status: string }> = [];
+    if (userMessage.sessionFileIds && userMessage.sessionFileIds.length > 0) {
+      const sessionFiles = await Promise.all(
+        userMessage.sessionFileIds.map((id) => ctx.db.get(id)),
+      );
+      for (const sf of sessionFiles) {
+        if (!sf) continue;
+        attachedFiles.push({
+          name: sf.displayName,
+          contentType: sf.contentType ?? "application/octet-stream",
+          sandboxPath: sf.sandboxPath ?? null,
+          status: sf.status,
+        });
+        if (sf.storageId && sf.contentType?.startsWith("image/")) {
+          const url = await ctx.storage.getUrl(sf.storageId);
+          if (url) attachmentUrls.push(url);
+        }
+      }
+    }
+
+    // Pass the conversation's rolling summary for long-context memory.
+    const conversation = await ctx.db.get(conversationId);
+    const summaryContext = conversation?.summaryContext;
+
     await ctx.db.patch(runId, {
       status: "running",
       startedAt: Date.now(),
@@ -171,11 +204,13 @@ export const claimRun = mutation({
       updatedAt: Date.now(),
     });
 
-    // Intentional: agentToken verifies WHO can claim; we return runToken so subsequent
-    // mutations are bound to this specific run.
     return {
       runToken: run.runToken,
+      modelId: conversation?.modelId ?? "gemini-2.5-flash",
       userMessageContent: userMessage.content,
+      attachmentUrls,
+      attachedFiles,
+      summaryContext,
     };
   },
 });
@@ -250,6 +285,19 @@ export const syncAssistantMessageContent = mutation({
       status: "streaming",
     });
     await ctx.db.patch(run.conversationId, { updatedAt: Date.now() });
+  },
+});
+
+export const syncThinkingContent = mutation({
+  args: {
+    runId: v.id("runs"),
+    runToken: v.string(),
+    messageId: v.id("messages"),
+    thinkingContent: v.string(),
+  },
+  handler: async (ctx, { runId, runToken, messageId, thinkingContent }) => {
+    await requireRun(ctx, runId, runToken);
+    await ctx.db.patch(messageId, { thinkingContent });
   },
 });
 
@@ -363,6 +411,73 @@ export const finalizeRun = mutation({
       lastError: status === "error" ? error : undefined,
       updatedAt: now,
     });
+  },
+});
+
+/**
+ * User-initiated stop. Marks the active run as error/cancelled and returns the conversation
+ * to idle so the user can send another message immediately. The daemon will eventually
+ * try to finalizeRun and will overwrite — that's fine, we just want the UI unblocked.
+ */
+export const cancelRun = mutation({
+  args: { runId: v.id("runs") },
+  handler: async (ctx, { runId }) => {
+    const run = await ctx.db.get(runId);
+    if (!run) return;
+    if (run.status === "completed" || run.status === "error") return; // already done
+    const now = Date.now();
+    await ctx.db.patch(runId, { status: "error", error: "Cancelled by user", completedAt: now });
+    if (run.assistantMessageId) {
+      await ctx.db.patch(run.assistantMessageId, { status: "completed", content: "[Cancelled]" });
+    }
+    await ctx.db.patch(run.conversationId, { status: "idle", updatedAt: now });
+  },
+});
+
+/**
+ * Stream live bash/tool output chunks to the tool execution record.
+ * The frontend subscribes reactively — each appended chunk triggers a UI update.
+ */
+export const appendToolOutput = mutation({
+  args: {
+    toolExecutionId: v.id("toolExecutions"),
+    runToken: v.string(),
+    chunk: v.string(),
+  },
+  handler: async (ctx, { toolExecutionId, runToken, chunk }) => {
+    const record = await ctx.db.get(toolExecutionId);
+    if (!record) throw new Error("Tool execution not found");
+    await requireRun(ctx, record.runId, runToken);
+    await ctx.db.patch(toolExecutionId, {
+      outputText: (record.outputText ?? "") + chunk,
+    });
+  },
+});
+
+/** Persist the rolling conversation summary for long-context memory (called from daemon). */
+export const saveSummaryContext = mutation({
+  args: {
+    conversationId: v.id("conversations"),
+    agentToken: v.string(),
+    summary: v.string(),
+  },
+  handler: async (ctx, { conversationId, agentToken, summary }) => {
+    await requireConversation(ctx, conversationId, agentToken);
+    await ctx.db.patch(conversationId, { summaryContext: summary, updatedAt: Date.now() });
+  },
+});
+
+/** Force a stuck run to error state (called from sweeper when heartbeat times out). */
+export const forceErrorRun = internalMutation({
+  args: { runId: v.id("runs"), error: v.string() },
+  handler: async (ctx, { runId, error }) => {
+    const run = await ctx.db.get(runId);
+    if (!run || run.status === "completed" || run.status === "error") return;
+    const now = Date.now();
+    await ctx.db.patch(runId, { status: "error", error, completedAt: now });
+    if (run.assistantMessageId) {
+      await ctx.db.patch(run.assistantMessageId, { status: "error" });
+    }
   },
 });
 

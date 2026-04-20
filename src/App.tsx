@@ -23,10 +23,16 @@ export default function App() {
   const active = useActiveRun(selectedId);
 
   // Auto-select the first conversation if none is selected and the list arrives.
+  // Also clear selection if the selected conversation was deleted (no longer in list).
   useEffect(() => {
-    const firstConversation = conversations?.[0];
-    if (selectedId || !firstConversation) return;
-    setSelectedId(firstConversation._id);
+    if (!conversations) return;
+    if (selectedId) {
+      const stillExists = conversations.some((c) => c._id === selectedId);
+      if (!stillExists) setSelectedId(conversations[0]?._id ?? null);
+      return;
+    }
+    const firstConversation = conversations[0];
+    if (firstConversation) setSelectedId(firstConversation._id);
   }, [conversations, selectedId]);
 
   // Keep the html element's class in sync for tailwind's dark/light variants.

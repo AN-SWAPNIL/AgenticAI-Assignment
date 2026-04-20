@@ -62,7 +62,7 @@ export const registerUpload = mutation({
       displayName: sanitizeDisplayName(displayName),
       sandboxPath: buildUploadPath(displayName),
       storageId,
-      contentType: contentType || metadata?.contentType,
+      contentType: contentType || metadata?.contentType || undefined,
       sizeBytes: resolvedSize,
       createdAt: now,
       updatedAt: now,

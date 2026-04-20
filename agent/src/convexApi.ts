@@ -24,7 +24,14 @@ export const api = {
     >,
     claimRun: makeFunctionReference<"mutation">("ingest:claimRun") as M<
       { conversationId: string; agentToken: string; runId: string },
-      { runToken: string; userMessageContent: string } | null
+      {
+        runToken: string;
+        modelId: string;
+        userMessageContent: string;
+        attachmentUrls: string[];
+        attachedFiles: Array<{ name: string; contentType: string; sandboxPath: string | null; status: string }>;
+        summaryContext: string | undefined;
+      } | null
     >,
     ensureAssistantMessage: makeFunctionReference<"mutation">(
       "ingest:ensureAssistantMessage",
@@ -39,6 +46,12 @@ export const api = {
       "ingest:syncAssistantMessageContent",
     ) as M<
       { runId: string; runToken: string; messageId: string; content: string },
+      null
+    >,
+    syncThinkingContent: makeFunctionReference<"mutation">(
+      "ingest:syncThinkingContent",
+    ) as M<
+      { runId: string; runToken: string; messageId: string; thinkingContent: string },
       null
     >,
     startToolExecution: makeFunctionReference<"mutation">(
@@ -64,6 +77,12 @@ export const api = {
         errorText?: string;
         durationMs: number;
       },
+      null
+    >,
+    appendToolOutput: makeFunctionReference<"mutation">(
+      "ingest:appendToolOutput",
+    ) as M<
+      { toolExecutionId: string; runToken: string; chunk: string },
       null
     >,
     appendTimelineEvent: makeFunctionReference<"mutation">(
@@ -98,6 +117,12 @@ export const api = {
       },
       { sessionFileId: string }
     >,
+    saveSummaryContext: makeFunctionReference<"mutation">(
+      "ingest:saveSummaryContext",
+    ) as M<
+      { conversationId: string; agentToken: string; summary: string },
+      null
+    >,
   },
   conversations: {
     messages: makeFunctionReference<"query">("conversations:messages") as Q<
@@ -107,7 +132,12 @@ export const api = {
         role: "user" | "assistant" | "system";
         content: string;
         order: number;
+        attachmentUrls?: string[];
       }>
+    >,
+    get: makeFunctionReference<"query">("conversations:get") as Q<
+      { conversationId: string },
+      { summaryContext?: string; modelId?: string } | null
     >,
   },
 };

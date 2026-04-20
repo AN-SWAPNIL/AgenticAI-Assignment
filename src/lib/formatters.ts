@@ -2,10 +2,20 @@ import { format, formatDistanceToNowStrict } from "date-fns";
 
 export function formatRelative(timestamp: number | undefined | null): string {
   if (!timestamp) return "—";
-  const distance = formatDistanceToNowStrict(new Date(timestamp), {
-    addSuffix: true,
-  });
+  const distance = formatDistanceToNowStrict(new Date(timestamp), { addSuffix: true });
   return distance;
+}
+
+/** Format a timestamp as HH:MM for same-day times (readable in chat context). */
+export function formatChatTime(timestamp: number | undefined | null): string {
+  if (!timestamp) return "";
+  const d = new Date(timestamp);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  return sameDay ? format(d, "HH:mm") : format(d, "MMM d, HH:mm");
 }
 
 export function formatClock(timestamp: number | undefined | null): string {
