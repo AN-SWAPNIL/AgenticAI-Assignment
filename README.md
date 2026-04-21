@@ -34,9 +34,9 @@ The project is intentionally designed for the assignment goal: architecture clar
 
 The system has three clear zones:
 
-- Control plane: React UI + Convex (state, orchestration, observability storage).
-- Bridge layer: Orchestrator actions that provision/revive/delete Daytona sandboxes.
-- Execution plane: one in-VM long-lived Pi daemon per conversation.
+- **Control plane**: React UI + Convex (state, orchestration, observability storage).
+- **Bridge layer**: Orchestrator actions that provision/revive/delete Daytona sandboxes.
+- **Execution plane**: one in-VM long-lived Pi daemon per conversation.
 
 ### Design Goals
 
@@ -60,26 +60,27 @@ The system has three clear zones:
 
 ```mermaid
 flowchart TB
-  USER[User] --> UI[React UI]
+  USER["User"] --> UI["React UI"]
 
-  subgraph CONTROL[Control Plane]
-    UI --> CONVEX[Convex queries and mutations]
-    CONVEX --> DB[(Convex DB)]
-    CONVEX --> ORCH[Orchestrator actions]
-    ORCH --> SWEEP[Crons and sweeper]
+  subgraph CONTROL["Control Plane (trusted)"]
+    UI --> CONVEX["Convex queries / mutations"]
+    CONVEX --> DB[("Convex DB")]
+    CONVEX --> ORCH["Orchestrator Node actions"]
+    ORCH --> SWEEP["Cron sweeper (hourly)"]
+    ORCH --> FILES["File transfer workers"]
   end
 
-  subgraph EXEC[Execution Plane]
-    ORCH --> VM[Daytona sandbox]
-    VM --> SESSION[Persistent Daytona session]
-    SESSION --> DAEMON[Pi daemon]
-    DAEMON --> TOOLS[bash read write edit grep glob webfetch websearch share_file]
-    TOOLS --> WORKSPACE[/home/daytona/workspace]
-    DAEMON --> MODEL[Model providers via pi-ai]
+  subgraph EXEC["Execution Plane (isolated)"]
+    ORCH --> VM["Daytona sandbox"]
+    VM --> SESSION["Persistent Daytona session"]
+    SESSION --> DAEMON["Pi daemon"]
+    DAEMON --> TOOLS["bash / read / write / edit / grep / glob / webfetch / websearch / share_file"]
+    TOOLS --> WORKSPACE["Sandbox workspace"]
+    DAEMON --> MODEL["Model provider via pi-ai"]
   end
 
-  DAEMON -->|heartbeat runs tools timeline| CONVEX
-  DB -->|reactive updates| UI
+  DAEMON -->|"heartbeat + run + tool + timeline mutations"| CONVEX
+  DB -->|"reactive subscriptions"| UI
 ```
 
 ### Thread-to-VM Mapping
@@ -88,10 +89,13 @@ Core invariant: one thread, one sandbox, one daemon.
 
 ```mermaid
 flowchart LR
-  C1[Conversation A] --> S1[Sandbox A]
-  S1 --> D1[Daemon A]
-  C2[Conversation B] --> S2[Sandbox B]
-  S2 --> D2[Daemon B]
+  C1["Conversation A"] --> S1["Sandbox A"]
+  S1 --> D1["Daemon A"]
+  D1 --> W1["Workspace A"]
+
+  C2["Conversation B"] --> S2["Sandbox B"]
+  S2 --> D2["Daemon B"]
+  D2 --> W2["Workspace B"]
 ```
 
 Benefits:
@@ -117,9 +121,11 @@ sequenceDiagram
   UI->>CV: conversations.create
   CV->>CV: status=provisioning
   UI->>OR: provisionConversation
-  OR->>DY: create sandbox + session
-  OR->>DY: upload runtime bundle
-  OR->>DY: launch daemon
+  OR->>DY: create sandbox (snapshot or language runtime)
+  OR->>DY: create persistent session
+  OR->>DY: upload agentHost.mjs bundle
+  OR->>DY: npm install (skipped if snapshot)
+  OR->>DY: launch daemon via executeSessionCommand
   DM->>CV: ingest.heartbeat
   CV->>CV: status=idle
 ```
@@ -132,18 +138,49 @@ sequenceDiagram
   participant UI as React UI
   participant CV as Convex
   participant AG as Pi daemon
+  participant MP as Model provider
 
   User->>UI: Send message
   UI->>CV: conversations.sendMessage
-  CV->>CV: insert user message + run queued
+  CV->>CV: insert user message + run (queued)
   AG-->>CV: subscribe ingest.nextQueuedRun
   CV-->>AG: queued run visible
-  AG->>CV: ingest.claimRun
-  AG->>CV: append assistant and thinking deltas
-  AG->>CV: start and finish tool executions
-  AG->>CV: append timeline events
-  AG->>CV: finalize run
-  CV-->>UI: reactive transcript and timeline updates
+  AG->>CV: ingest.claimRun (status: claimed -> running)
+  AG->>CV: ingest.ensureAssistantMessage
+  AG->>MP: prompt with history + tools
+  AG->>CV: appendAssistantDelta (streaming)
+  AG->>CV: appendThinkingDelta (if thinking enabled)
+  AG->>CV: startToolExecution / finishToolExecution
+  AG->>CV: appendTimelineEvent
+  AG->>CV: syncAssistantMessageContent
+  AG->>CV: finalizeRun (completed or error)
+  CV->>CV: conversation => idle
+  CV-->>UI: reactive transcript + timeline updates
+```
+
+### File Transfer Flow
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant UI as React UI
+  participant CV as Convex
+  participant FT as File transfer worker
+  participant DY as Daytona sandbox
+
+  User->>UI: Upload file
+  UI->>CV: files.generateUploadUrl
+  UI->>CV: browser uploads bytes to Convex storage
+  UI->>CV: files.registerUpload
+  CV->>FT: scheduler.runAfter (processUploadToSandbox)
+  FT->>DY: upload file to workspace/uploads/
+
+  Note over UI,DY: Agent export path
+  DY->>CV: ingest.shareFile (share_file tool)
+  CV->>FT: scheduler.runAfter (processDownloadFromSandbox)
+  FT->>DY: download file bytes from workspace
+  FT->>CV: store in Convex storage
+  CV-->>UI: sessionFile status=ready, downloadUrl available
 ```
 
 ## Agent Tools
@@ -161,14 +198,15 @@ Required tools are all implemented:
 
 Additional helper:
 
-- `share_file` for exporting sandbox files to downloadable artifacts.
+- `share_file` — exports a sandbox workspace file into Convex storage as a downloadable artifact.
 
 Tool behavior:
 
 - Structured outputs persisted in `toolExecutions`.
 - Tool execution order persisted by `sequence` and `timelineEvents`.
-- Bash chunks stream incrementally.
+- Bash chunks stream incrementally via `appendToolOutput`.
 - Default timeout is 5 seconds per tool call (override with `timeoutSeconds`).
+- `websearch` uses Tavily if `TAVILY_API_KEY` is set; falls back to DuckDuckGo otherwise.
 
 ## Observability Design
 
@@ -179,21 +217,25 @@ Two-layer observability model:
 
 ```mermaid
 flowchart LR
-  AGENT[Daemon events] --> E1[message_update]
-  AGENT --> E2[tool_execution_start]
-  AGENT --> E3[tool_execution_end]
-  AGENT --> E4[message_end]
+  AGENT["Daemon event stream"]
+  AGENT --> E1["message_update"]
+  AGENT --> E2["tool_execution_start"]
+  AGENT --> E3["tool_execution_end"]
+  AGENT --> E4["message_end"]
 
-  E1 --> M1[appendAssistantDelta]
-  E1 --> M2[appendTimelineEvent]
-  E2 --> M3[startToolExecution]
-  E3 --> M4[finishToolExecution]
-  E4 --> M5[syncAssistantMessageContent]
+  E1 --> M1["appendAssistantDelta"]
+  E1 --> M2["appendTimelineEvent"]
+  E2 --> M3["startToolExecution"]
+  E2 --> M2
+  E3 --> M4["finishToolExecution"]
+  E3 --> M2
+  E4 --> M5["syncAssistantMessageContent"]
+  E4 --> M2
 
-  M1 --> DB1[(messages)]
-  M3 --> DB2[(toolExecutions)]
+  M1 --> DB1[("messages")]
+  M3 --> DB2[("toolExecutions")]
   M4 --> DB2
-  M2 --> DB3[(timelineEvents)]
+  M2 --> DB3[("timelineEvents")]
   M5 --> DB1
 ```
 
@@ -209,48 +251,118 @@ Primary observability UI:
 ```mermaid
 stateDiagram-v2
   [*] --> queued
-  queued --> running: claimRun
-  running --> completed: finalizeRun completed
-  running --> error: finalizeRun error
+  queued --> claimed : claimRun (atomic)
+  claimed --> running : ensureAssistantMessage
+  running --> completed : finalizeRun completed
+  running --> error : finalizeRun error
   completed --> [*]
   error --> [*]
 ```
 
+> **Note:** The `claimed` state (absent in Prev_Readme.md) was added to make run atomicity explicit — the daemon transitions `queued → claimed` in a single mutation before any work begins, preventing double-pickup across concurrently revived daemons.
+
 ## Data Model
 
-Core Convex tables:
+Core Convex tables (`convex/schema.ts`):
 
-- `conversations`: thread metadata, sandbox mapping, heartbeat, runtime version, status.
-- `messages`: ordered transcript with streaming assistant and optional thinking content.
-- `runs`: queued/running/completed/error execution unit per user turn.
-- `toolExecutions`: per-tool call logs (input, output/error, timing, status).
-- `timelineEvents`: ordered event stream for observability and phase rendering.
-- `sessionFiles`: upload/download lifecycle for file transfer.
+- `conversations` — thread metadata, sandbox/session mapping, agentToken, heartbeat, runtime version, modelId, thinkingLevel, summaryContext, volumeName, status.
+- `messages` — ordered transcript with streaming assistant content, optional thinkingContent, sessionFileIds for attachments.
+- `runs` — execution unit per user turn; states: queued / claimed / running / completed / error.
+- `toolExecutions` — per-tool audit rows (inputJson, outputText, errorText, timing, sequence, status).
+- `timelineEvents` — ordered event stream for observability and phase rendering.
+- `sessionFiles` — upload/download lifecycle ledger (direction, source, status, sandboxPath, storageId, sizeBytes, downloadedAt).
 
-See `convex/schema.ts`.
+```mermaid
+erDiagram
+  conversations ||--o{ messages : has
+  conversations ||--o{ runs : has
+  conversations ||--o{ sessionFiles : owns
+  runs ||--o{ toolExecutions : records
+  runs ||--o{ timelineEvents : emits
+  messages ||--o{ sessionFiles : attaches
+
+  conversations {
+    string id
+    string title
+    string status
+    string sandboxId
+    string sessionId
+    string agentToken
+    string runtimeVersion
+    string modelId
+    string thinkingLevel
+    string summaryContext
+    string volumeName
+    number lastHeartbeatAt
+  }
+  messages {
+    string id
+    string conversationId
+    string role
+    string content
+    string thinkingContent
+    string status
+    number order
+  }
+  runs {
+    string id
+    string conversationId
+    string status
+    string runToken
+    number startedAt
+    number completedAt
+  }
+  toolExecutions {
+    string id
+    string runId
+    number sequence
+    string toolName
+    string status
+    number durationMs
+  }
+  timelineEvents {
+    string id
+    string runId
+    number sequence
+    string type
+    string payloadJson
+  }
+  sessionFiles {
+    string id
+    string conversationId
+    string direction
+    string source
+    string status
+    string sandboxPath
+    number sizeBytes
+  }
+```
 
 ## Reliability, Consistency, Security
 
 ### Reliability
 
-- Daemon heartbeat is tracked and used for revive logic.
-- `reviveDaemonIfDead` restarts stale or mismatched runtime daemons.
-- Cancel/finalize paths close running tool records defensively.
+- Daemon heartbeat is tracked every ~10 s; `reviveDaemonIfDead` re-launches if stale (>30 s).
+- Hourly cron sweeper (`sweeper.sweepOrphans`) catches abandoned sandboxes and stale conversations.
+- `reviveDaemonIfDead` also handles runtime version mismatch — re-launches daemon with the latest bundle.
+- Cancel/finalize paths close in-flight `toolExecution` rows defensively.
 - New user message supersedes prior in-flight runs for responsiveness.
+- Snapshot-based fast path reduces cold-start from ~30 s to ~5 s when `DAYTONA_SNAPSHOT` is set.
 
 ### Consistency
 
-- Runs are claimed atomically before execution.
-- Assistant message is ensured before delta streaming.
+- Runs are claimed atomically (`queued → claimed`) before any execution starts.
+- Assistant message is ensured before delta streaming begins.
 - Final assistant content is synced before run completion.
-- Conversation returns to `idle` after run finalization.
+- Conversation returns to `idle` after run finalization so errors do not permanently jam the thread.
 
 ### Security and Isolation
 
 - Untrusted tool execution stays inside Daytona sandbox.
-- VM writes are token-gated (`agentToken`, `runToken`).
-- Workspace path guards keep file operations in sandbox root.
-- One sandbox per conversation forms the isolation boundary.
+- VM writes are token-gated (`agentToken` per conversation, `runToken` per run).
+- Workspace path guards keep file operations within `/home/daytona/workspace`.
+- One sandbox per conversation forms the hard isolation boundary.
+- Control plane never executes model-generated code directly.
 
 ## Repository Layout
 
@@ -258,30 +370,44 @@ See `convex/schema.ts`.
 AgenticAI-Assignment/
   agent/
     src/
-      agentHost.ts
-      runLoop.ts
-      agentSession.ts
-      convexBridge.ts
-      convexApi.ts
-      deltaBuffer.ts
-      workspace.ts
-      systemPrompt.ts
+      agentHost.ts          # daemon entry point, Convex subscription loop
+      runLoop.ts            # agent turn: prompt, tools, delta emission
+      agentSession.ts       # pi-agent session wrapper
+      convexBridge.ts       # low-level Convex HTTP helpers
+      convexApi.ts          # typed Convex mutation helpers
+      deltaBuffer.ts        # streaming delta accumulator
+      workspace.ts          # workspace path guards
+      systemPrompt.ts       # system prompt builder
       tools/
+        bash.ts
+        read.ts / write.ts / edit.ts
+        grep.ts / glob.ts
+        webfetch.ts / websearch.ts
+        shareFile.ts
+        index.ts            # tool registry
   convex/
-    schema.ts
-    conversations.ts
-    ingest.ts
-    orchestrator.ts
-    sweeper.ts
-    sweeperData.ts
-    crons.ts
+    schema.ts               # all table definitions + indexes
+    conversations.ts        # thread CRUD, sendMessage, lifecycle
+    ingest.ts               # VM-originated mutations (heartbeat, runs, tools, timeline)
+    orchestrator.ts         # Node actions: provision / revive / delete sandbox
+    files.ts                # upload URL, registerUpload, listForConversation
+    fileTransfers.ts        # Node actions: processUploadToSandbox / processDownloadFromSandbox
+    sweeper.ts              # orphan sandbox cleanup logic
+    sweeperData.ts          # sweeper Convex queries
+    crons.ts                # hourly cron registration
+    daytonaUtils.ts         # safe sandbox delete helper
+    lib.ts                  # shared utilities
     runtime/
-      agentHostBundle.generated.ts
+      agentHostBundle.generated.ts  # bundled daemon (output of bundle:agent)
   scripts/
-    bundle-runtime.mjs
+    bundle-runtime.mjs      # esbuild bundle script for agent
   src/
     App.tsx
     components/
+      chat/
+      conversation/
+      layout/
+      observability/
     hooks/
     lib/
     styles/
@@ -295,8 +421,8 @@ AgenticAI-Assignment/
 - Convex account
 - Daytona API key
 - OpenAI API key
-- Gemini API key (kept for compatibility)
 - Tavily API key (recommended for better websearch)
+- Anthropic API key (optional, for Claude models)
 
 ### Install
 
@@ -315,10 +441,9 @@ npx convex dev
 ```bash
 npx convex env set DAYTONA_API_KEY "dtn_..."
 npx convex env set OPENAI_API_KEY "sk-..."
-npx convex env set GEMINI_API_KEY "AIza..."
-npx convex env set TAVILY_API_KEY "tvly-..."
-npx convex env set ANTHROPIC_API_KEY "sk-ant-..."      # optional
-npx convex env set DAYTONA_SNAPSHOT "agentic-runtime"  # optional
+npx convex env set TAVILY_API_KEY "tvly-..."        # optional but recommended
+npx convex env set ANTHROPIC_API_KEY "sk-ant-..."   # optional
+npx convex env set DAYTONA_SNAPSHOT "agentic-runtime"  # optional, faster cold start
 ```
 
 ### Build and typecheck
@@ -342,16 +467,16 @@ Open: `http://localhost:5173`
 
 - `CONVEX_DEPLOYMENT`
 - `VITE_CONVEX_URL`
-- `VITE_CONVEX_SITE_URL` (optional for sharing links)
+- `VITE_CONVEX_SITE_URL` (optional)
 
 ### Convex deployment secrets
 
 - `DAYTONA_API_KEY`
 - `OPENAI_API_KEY`
-- `GEMINI_API_KEY`
 - `TAVILY_API_KEY` (optional)
 - `ANTHROPIC_API_KEY` (optional)
-- `DAYTONA_SNAPSHOT` (optional)
+- `DAYTONA_SNAPSHOT` (optional, enables snapshot fast-path)
+- `AGENT_MODEL_ID` (optional, default: `gpt-4.1`)
 
 ### Runtime env injected into sandbox daemon
 
@@ -359,41 +484,58 @@ Open: `http://localhost:5173`
 - `CONVEX_CONVERSATION_ID`
 - `CONVEX_AGENT_TOKEN`
 - `OPENAI_API_KEY`
-- `GEMINI_API_KEY` (for compatibility)
 - `TAVILY_API_KEY`
 - `ANTHROPIC_API_KEY` (if set)
 - `AGENT_WORKSPACE_DIR`
 - `AGENT_MODEL_ID`
 - `AGENT_THINKING_LEVEL`
 
+> **Change from Prev_Readme.md:** `GEMINI_API_KEY` is no longer required or passed to the daemon. The orchestrator env guard was removed. Default model is `gpt-4.1` (OpenAI). Anthropic support added via `ANTHROPIC_API_KEY`.
+
 ## File Transfer Lifecycle
 
-1. User upload:
-   - browser uploads to Convex storage via signed URL
-   - worker copies file into sandbox workspace uploads directory
-2. Agent export:
-   - agent calls `share_file`
-   - worker downloads from sandbox and stores in Convex
-   - UI renders downloadable artifact
-3. Session history:
-   - all transfers tracked in `sessionFiles` with status transitions and metadata
+1. **User upload**
+   - Browser calls `files.generateUploadUrl` → uploads bytes to Convex storage directly.
+   - `files.registerUpload` creates a `sessionFiles` row (`status=queued`).
+   - `fileTransfers.processUploadToSandbox` (Node action) copies file into sandbox at `workspace/uploads/`.
 
-Current transfer size policy: 25 MB max for upload/export workers.
+2. **Agent export**
+   - Agent calls `share_file` tool with a workspace path.
+   - `ingest.shareFile` mutation creates a `sessionFiles` row and schedules `fileTransfers.processDownloadFromSandbox`.
+   - Worker reads bytes from sandbox, stores in Convex, marks `status=ready`.
+   - UI shows downloadable artifact card.
+
+3. **Session history**
+   - All transfers tracked in `sessionFiles` with status transitions and metadata.
+   - `files.listForConversation` resolves signed download URLs on read.
+
+Transfer size policy: 25 MB max for both upload and export.
 
 ## Design Tradeoffs
 
-1. One sandbox per conversation
-   - Pro: strongest isolation and simplest mapping model.
+1. **One sandbox per conversation**
+   - Pro: strongest isolation and simplest ownership model.
    - Con: higher infra cost than pooled executors.
-2. Long-lived daemon per conversation
-   - Pro: better latency and smoother streaming.
+
+2. **Long-lived daemon per conversation**
+   - Pro: better latency, smoother streaming, true "agent lives in VM" semantics.
    - Con: requires heartbeat/revive lifecycle management.
-3. Dual observability tables
+
+3. **Dual observability tables** (`timelineEvents` + `toolExecutions`)
    - Pro: both forensic timeline and UI-friendly tool history.
    - Con: more backend plumbing than a single log stream.
-4. Bundled runtime delivered via Convex
-   - Pro: deterministic runtime versioning.
-   - Con: requires bundle refresh after runtime code updates.
+
+4. **Bundled runtime delivered via Convex**
+   - Pro: deterministic runtime versioning, version mismatch triggers auto-revive.
+   - Con: requires bundle refresh after runtime code changes.
+
+5. **Snapshot fast-path**
+   - Pro: cuts sandbox cold-start from ~30 s to ~5 s when `DAYTONA_SNAPSHOT` is set.
+   - Con: snapshot image must be maintained separately; fallback to language runtime on miss.
+
+6. **OpenAI-first, multi-provider optional**
+   - Pro: single required key simplifies setup; Anthropic support available via opt-in env var.
+   - Con: model key/config drift can cause launch failures if env is incomplete.
 
 ## Useful Commands
 
