@@ -486,8 +486,6 @@ Open: `http://localhost:5173`
 - `AGENT_MODEL_ID`
 - `AGENT_THINKING_LEVEL`
 
-> **Change from Prev_Readme.md:** `GEMINI_API_KEY` is no longer required or passed to the daemon. The orchestrator env guard was removed. Default model is `gpt-4.1` (OpenAI).
-
 ## File Transfer Lifecycle
 
 1. **User upload**
