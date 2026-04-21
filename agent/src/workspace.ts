@@ -11,6 +11,8 @@ export class Workspace {
   static async prepare(root: string): Promise<Workspace> {
     const resolved = path.resolve(root);
     await mkdir(resolved, { recursive: true });
+    await mkdir(path.join(resolved, "work"), { recursive: true });
+    await mkdir(path.join(resolved, "uploads"), { recursive: true });
     return new Workspace(resolved);
   }
 

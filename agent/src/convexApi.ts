@@ -28,6 +28,7 @@ export const api = {
         runToken: string;
         userMessageId: string;
         modelId: string;
+        thinkingLevel: string | undefined;
         userMessageContent: string;
         attachmentUrls: string[];
         attachedFiles: Array<{ name: string; contentType: string; sandboxPath: string | null; status: string }>;
@@ -53,6 +54,12 @@ export const api = {
       "ingest:syncThinkingContent",
     ) as M<
       { runId: string; runToken: string; messageId: string; thinkingContent: string },
+      null
+    >,
+    appendThinkingDelta: makeFunctionReference<"mutation">(
+      "ingest:appendThinkingDelta",
+    ) as M<
+      { runId: string; runToken: string; messageId: string; chunk: string },
       null
     >,
     startToolExecution: makeFunctionReference<"mutation">(
@@ -113,6 +120,7 @@ export const api = {
       {
         runId: string;
         runToken: string;
+        sequence: number;
         path: string;
         displayName?: string;
       },
@@ -139,6 +147,10 @@ export const api = {
     get: makeFunctionReference<"query">("conversations:get") as Q<
       { conversationId: string },
       { summaryContext?: string; modelId?: string } | null
+    >,
+    runById: makeFunctionReference<"query">("conversations:runById") as Q<
+      { runId: string },
+      { _id: string; status: string; error?: string } | null
     >,
   },
 };

@@ -8,6 +8,7 @@ import {
   THINKING_LEVELS_OPTIONAL,
   THINKING_LEVELS_REQUIRED,
 } from "../../types";
+import { writePreferredModelId } from "../../lib/modelPreferences";
 
 interface SidebarSettingsProps {
   conversation: Conversation | null | undefined;
@@ -15,7 +16,7 @@ interface SidebarSettingsProps {
   onToggleTheme: () => void;
 }
 
-const DEFAULT_MODEL: ModelId = "gemini-2.5-flash";
+const DEFAULT_MODEL: ModelId = "gpt-5-mini";
 
 function normalizeThinkingForModel(modelId: string, thinkingLevel: string | undefined): ThinkingLevel {
   const mode = MODEL_OPTIONS.find((option) => option.id === modelId)?.thinking ?? "optional";
@@ -69,6 +70,7 @@ export function SidebarSettings({ conversation, theme, onToggleTheme }: SidebarS
     setSaving(true);
     try {
       await setModel({ conversationId: conversation._id, modelId: nextModelId });
+      writePreferredModelId(nextModelId);
       const normalizedThinking = normalizeThinkingForModel(nextModelId, conversation.thinkingLevel);
       if (normalizedThinking !== (conversation.thinkingLevel ?? "off")) {
         await setThinkingLevel({
@@ -159,6 +161,11 @@ export function SidebarSettings({ conversation, theme, onToggleTheme }: SidebarS
                   </option>
                 ))}
               </select>
+              {modelMeta.thinking === "none" ? (
+                <p className="mt-1.5 text-[10px] text-ink-soft/70">
+                  This model does not emit thinking traces. Switch to GPT-5 Mini/Nano for live thinking.
+                </p>
+              ) : null}
             </div>
           </div>
 

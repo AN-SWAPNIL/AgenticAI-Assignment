@@ -8,7 +8,7 @@ import { processRun } from "./runLoop.js";
  * launched by orchestrator.provisionConversation as a long-lived Node process.
  *
  * Lifecycle:
- *   1. Parse env (CONVEX_URL, CONVEX_CONVERSATION_ID, CONVEX_AGENT_TOKEN, GEMINI_API_KEY,
+ *   1. Parse env (CONVEX_URL, CONVEX_CONVERSATION_ID, CONVEX_AGENT_TOKEN, OPENAI_API_KEY,
  *      TAVILY_API_KEY, AGENT_WORKSPACE_DIR, AGENT_MODEL_ID, AGENT_THINKING_LEVEL).
  *   2. Prepare workspace directory.
  *   3. Open ConvexBridge (WebSocket + HTTP).
@@ -27,9 +27,7 @@ interface DaemonEnv {
   convexUrl: string;
   conversationId: string;
   agentToken: string;
-  geminiApiKey: string;
-  anthropicApiKey?: string;
-  openAiApiKey?: string;
+  openAiApiKey: string;
   tavilyApiKey?: string;
   workspaceDir: string;
   modelId: string;
@@ -56,12 +54,10 @@ function readEnv(): DaemonEnv {
     convexUrl: get("CONVEX_URL"),
     conversationId: get("CONVEX_CONVERSATION_ID"),
     agentToken: get("CONVEX_AGENT_TOKEN"),
-    geminiApiKey: get("GEMINI_API_KEY"),
-    anthropicApiKey: optional("ANTHROPIC_API_KEY", "") || undefined,
-    openAiApiKey: optional("OPENAI_API_KEY", "") || undefined,
+    openAiApiKey: get("OPENAI_API_KEY"),
     tavilyApiKey: optional("TAVILY_API_KEY", "") || undefined,
     workspaceDir: optional("AGENT_WORKSPACE_DIR", "/home/daytona/workspace"),
-    modelId: optional("AGENT_MODEL_ID", "gemini-2.5-flash"),
+    modelId: optional("AGENT_MODEL_ID", "gpt-4.1"),
     thinkingLevel: thinking as DaemonEnv["thinkingLevel"],
   };
 }
@@ -113,8 +109,6 @@ async function main(): Promise<void> {
             bridge,
             workspace,
             modelId: env.modelId,
-            apiKey: env.geminiApiKey,
-            anthropicApiKey: env.anthropicApiKey,
             openAiApiKey: env.openAiApiKey,
             tavilyApiKey: env.tavilyApiKey,
             thinkingLevel: env.thinkingLevel,

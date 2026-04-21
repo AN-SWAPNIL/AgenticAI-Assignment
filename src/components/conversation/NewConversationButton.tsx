@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useAction, useMutation } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import type { ConversationId } from "../../types";
+import { readPreferredModelId } from "../../lib/modelPreferences";
 
 interface NewConversationButtonProps {
   onCreated: (id: ConversationId) => void;
@@ -18,7 +19,10 @@ export function NewConversationButton({ onCreated }: NewConversationButtonProps)
     setBusy(true);
     setError(null);
     try {
-      const { conversationId } = await create({});
+      const preferredModelId = readPreferredModelId();
+      const { conversationId } = await create(
+        preferredModelId ? { modelId: preferredModelId } : {},
+      );
       onCreated(conversationId);
       provision({ conversationId }).catch((err) => {
         console.error("[ui] provision failed:", err);

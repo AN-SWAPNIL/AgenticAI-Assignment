@@ -45,7 +45,6 @@ const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(
     const isBusy =
       busy ||
       conversationStatus === "provisioning" ||
-      conversationStatus === "running" ||
       conversationStatus === "deleted";
 
     const canSend = !isBusy && (draft.trim().length > 0 || pendingFiles.length > 0);
@@ -54,10 +53,18 @@ const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(
       conversationStatus === "provisioning"
         ? "Sandbox is starting up… (~30s)"
         : conversationStatus === "running"
-          ? "Agent is working — wait for this turn to finish."
+          ? "Agent is working. Type and send to interrupt with your next message."
           : conversationStatus === "error"
             ? "Daemon is in error state. You can still attach files or revive."
             : "Message the agent… (Ctrl/Cmd + Enter to send)";
+
+    const activeRunId = activeRun?._id;
+
+    const showStopButton =
+      conversationStatus === "running" &&
+      Boolean(activeRunId) &&
+      draft.trim().length === 0 &&
+      pendingFiles.length === 0;
 
     const uploadAndRegister = async (file: File): Promise<PendingFile> => {
       const uploadUrl = await generateUploadUrl({ conversationId });
@@ -247,11 +254,11 @@ const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(
               )}
             </button>
 
-            {/* Stop button (while agent is running) */}
-            {conversationStatus === "running" && activeRun ? (
+            {/* Stop button when run is active and no next message is drafted */}
+            {showStopButton ? (
               <button
                 type="button"
-                onClick={() => void cancelRun({ runId: activeRun._id })}
+                onClick={() => activeRunId && void cancelRun({ runId: activeRunId })}
                 className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-danger text-surface-0 hover:bg-danger/80 transition-colors"
                 title="Stop agent"
               >

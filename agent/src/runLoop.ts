@@ -23,9 +23,7 @@ export interface RunLoopOptions {
   bridge: ConvexBridge;
   workspace: Workspace;
   modelId: string;
-  apiKey: string;
-  anthropicApiKey?: string;
-  openAiApiKey?: string;
+  openAiApiKey: string;
   tavilyApiKey?: string;
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
   historyLimit?: number;
@@ -41,6 +39,7 @@ interface ToolCallTracker {
   inputJson: string;
   startedAt: number;
   sequence: number;
+  streamedOutput: boolean;
   toolExecutionId?: string;
   persisted: Promise<string>;
 }
@@ -49,6 +48,14 @@ interface ToolCallTracker {
 const SUMMARY_THRESHOLD = 20;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [5_000, 10_000, 20_000];
+const RUN_INTERRUPT_POLL_MS = 200;
+
+class RunInterruptedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunInterruptedError";
+  }
+}
 
 /**
  * A content part for multimodal messages. Mirrors the pi-ai ContentPart union.
@@ -63,26 +70,30 @@ export async function processRun(
   queuedRunId: string,
 ): Promise<void> {
   const { bridge } = opts;
+  let claimedRunToken: string | null = null;
 
-  const claim = await bridge.mutation(api.ingest.claimRun, {
-    conversationId: bridge.conversationId,
-    agentToken: bridge.agentToken,
-    runId: queuedRunId,
-  });
-  if (!claim) {
-    return;
-  }
+  try {
+    const claim = await bridge.mutation(api.ingest.claimRun, {
+      conversationId: bridge.conversationId,
+      agentToken: bridge.agentToken,
+      runId: queuedRunId,
+    });
+    if (!claim) {
+      return;
+    }
 
-  const {
-    runToken,
-    userMessageId,
-    modelId: claimModelId,
-    userMessageContent,
-    attachmentUrls,
-    attachedFiles,
-    summaryContext,
-  } = claim;
-  const runId = queuedRunId;
+    const {
+      runToken,
+      userMessageId,
+      modelId: claimModelId,
+      thinkingLevel: claimThinkingLevel,
+      userMessageContent,
+      attachmentUrls,
+      attachedFiles,
+      summaryContext,
+    } = claim;
+    claimedRunToken = runToken;
+    const runId = queuedRunId;
 
   const messageId = await bridge.mutation(api.ingest.ensureAssistantMessage, {
     runId,
@@ -100,6 +111,16 @@ export async function processRun(
     });
   };
   const deltaBuffer = new DeltaBuffer(flushDelta);
+
+  const flushThinkingDelta = async (chunk: string) => {
+    await bridge.mutation(api.ingest.appendThinkingDelta, {
+      runId,
+      runToken,
+      messageId,
+      chunk,
+    });
+  };
+  const thinkingDeltaBuffer = new DeltaBuffer(flushThinkingDelta, 0);
 
   const emitTimeline = (type: string, payload: unknown) => {
     void bridge
@@ -185,20 +206,20 @@ export async function processRun(
   const session = createAgentSession({
     workspace: opts.workspace,
     modelId: claimModelId || opts.modelId,
-    apiKey: opts.apiKey,
-    anthropicApiKey: opts.anthropicApiKey,
     openAiApiKey: opts.openAiApiKey,
     tavilyApiKey: opts.tavilyApiKey,
     onQueueFileExport: async ({ path, displayName }) =>
       await bridge.mutation(api.ingest.requestFileExport, {
         runId,
         runToken,
+        sequence: sequence.next(),
         path,
         displayName,
       }),
     onBashChunk: (toolCallId, chunk) => {
       const tracker = activeToolCalls.get(toolCallId);
       if (!tracker) return;
+      tracker.streamedOutput = true;
       void (async () => {
         try {
           const toolExecutionId = tracker.toolExecutionId ?? (await tracker.persisted);
@@ -214,7 +235,9 @@ export async function processRun(
         }
       })();
     },
-    thinkingLevel: opts.thinkingLevel,
+    thinkingLevel:
+      (claimThinkingLevel as "off" | "minimal" | "low" | "medium" | "high" | undefined) ??
+      opts.thinkingLevel,
   });
 
   // Prepend attached file context so the agent sees it before the user request.
@@ -269,6 +292,7 @@ export async function processRun(
       runId,
       runToken: runToken,
       deltaBuffer,
+      thinkingDeltaBuffer,
       activeToolCalls,
       sequence,
       emitTimeline,
@@ -281,10 +305,28 @@ export async function processRun(
     // Retry on 429 rate-limit with exponential back-off.
     let attempt = 0;
     while (true) {
+      const stopWatcher = createRunStopWatcher({
+        bridge,
+        runId,
+        pollMs: RUN_INTERRUPT_POLL_MS,
+      });
+
       try {
-        await session.agent.prompt(finalPromptInput as string);
+        const attemptPromise = Array.isArray(finalPromptInput)
+          ? session.agent.prompt({
+              role: "user",
+              content: finalPromptInput,
+              timestamp: Date.now(),
+            } as any)
+          : session.agent.prompt(finalPromptInput as string);
+        void attemptPromise.catch(() => undefined);
+
+        await Promise.race([attemptPromise, stopWatcher.promise]);
         break;
       } catch (err) {
+        if (err instanceof RunInterruptedError) {
+          throw err;
+        }
         const msg = err instanceof Error ? err.message : String(err);
         const isRateLimit = /RESOURCE_EXHAUSTED|429|rate.?limit|quota.?exceeded/i.test(msg);
         if (isRateLimit && attempt < MAX_RETRIES) {
@@ -295,6 +337,8 @@ export async function processRun(
           continue;
         }
         throw err;
+      } finally {
+        stopWatcher.cancel();
       }
     }
   } catch (err) {
@@ -302,6 +346,7 @@ export async function processRun(
   } finally {
     unsubscribe?.();
     await deltaBuffer.flush();
+    await thinkingDeltaBuffer.flush();
   }
 
   const assistantResult = extractFinalAssistantResult(session.agent.state.messages);
@@ -333,12 +378,66 @@ export async function processRun(
     await emitTimeline("agent_complete", {});
   }
 
-  await bridge.mutation(api.ingest.finalizeRun, {
-    runId,
-    runToken,
-    status: finalError ? "error" : "completed",
-    error: finalError,
-  });
+    await bridge.mutation(api.ingest.finalizeRun, {
+      runId,
+      runToken,
+      status: finalError ? "error" : "completed",
+      error: finalError,
+    });
+  } catch (err) {
+    if (claimedRunToken) {
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        await bridge.mutation(api.ingest.finalizeRun, {
+          runId: queuedRunId,
+          runToken: claimedRunToken,
+          status: "error",
+          error: truncateText(`Agent runtime crash: ${message}`, 1000),
+        });
+      } catch {
+        // best effort only
+      }
+    }
+    throw err;
+  }
+}
+
+function createRunStopWatcher(opts: {
+  bridge: ConvexBridge;
+  runId: string;
+  pollMs: number;
+}): { promise: Promise<void>; cancel: () => void } {
+  let cancelled = false;
+
+  const promise = (async () => {
+    while (!cancelled) {
+      await new Promise((resolve) => setTimeout(resolve, opts.pollMs));
+      if (cancelled) return;
+
+      try {
+        const run = await opts.bridge.query(api.conversations.runById, {
+          runId: opts.runId,
+        });
+        if (!run || run.status !== "running") {
+          throw new RunInterruptedError(
+            run?.error && run.error.trim().length > 0
+              ? run.error
+              : "Run interrupted by cancel/newer message.",
+          );
+        }
+      } catch (err) {
+        if (err instanceof RunInterruptedError) throw err;
+        // Transient query issues: keep polling instead of hard-failing the run.
+      }
+    }
+  })();
+
+  return {
+    promise,
+    cancel: () => {
+      cancelled = true;
+    },
+  };
 }
 
 // ─── attachment download ─────────────────────────────────────────────────────
@@ -393,8 +492,6 @@ async function generateConversationSummary(
   const summarySession = createAgentSession({
     workspace: opts.workspace,
     modelId: opts.modelId,
-    apiKey: opts.apiKey,
-    anthropicApiKey: opts.anthropicApiKey,
     openAiApiKey: opts.openAiApiKey,
     tavilyApiKey: opts.tavilyApiKey,
   });
@@ -433,6 +530,7 @@ interface EventHandlerCtx {
   runId: string;
   runToken: string;
   deltaBuffer: DeltaBuffer;
+  thinkingDeltaBuffer: DeltaBuffer;
   activeToolCalls: Map<string, ToolCallTracker>;
   sequence: { next: () => number };
   emitTimeline: (type: string, payload: unknown) => void;
@@ -458,6 +556,7 @@ function handleAgentEvent(event: unknown, ctx: EventHandlerCtx): void {
       }
       if (innerEv.type === "thinking_delta" && typeof innerEv.delta === "string") {
         ctx.runtimeState.thinkingContent += innerEv.delta;
+        ctx.thinkingDeltaBuffer.push(innerEv.delta);
       }
       if (innerEv.type === "error" && typeof innerEv.errorMessage === "string") {
         ctx.runtimeState.eventError = normalizeAgentError(innerEv.errorMessage);
@@ -503,6 +602,7 @@ function handleAgentEvent(event: unknown, ctx: EventHandlerCtx): void {
       inputJson,
       startedAt,
       sequence: seq,
+      streamedOutput: false,
       persisted: Promise.resolve(""),
     };
     tracker.persisted = ctx.bridge
@@ -541,14 +641,26 @@ function handleAgentEvent(event: unknown, ctx: EventHandlerCtx): void {
           return;
         }
       }
-      await ctx.bridge.mutation(api.ingest.finishToolExecution, {
+      const finishArgs: {
+        toolExecutionId: string;
+        runToken: string;
+        status: "success" | "error";
+        durationMs: number;
+        outputText?: string;
+        errorText?: string;
+      } = {
         toolExecutionId,
         runToken: ctx.runToken,
         status: isError ? "error" : "success",
-        outputText: isError ? undefined : truncateText(serialized),
-        errorText: isError ? truncateText(serialized) : undefined,
         durationMs,
-      });
+      };
+      if (isError) {
+        finishArgs.errorText = truncateText(serialized);
+      } else if (!tracker.streamedOutput) {
+        // Preserve live tool output for streamed tools (bash/shell).
+        finishArgs.outputText = truncateText(serialized);
+      }
+      await ctx.bridge.mutation(api.ingest.finishToolExecution, finishArgs);
     })().catch((err) => console.error("[agent] finishToolExecution failed:", err));
     ctx.activeToolCalls.delete(toolCallId);
     return;

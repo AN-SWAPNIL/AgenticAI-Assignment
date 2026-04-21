@@ -9,7 +9,7 @@ const BashParams = Type.Object({
     Type.String({ description: "Short description of what this command does, for logging." }),
   ),
   timeoutSeconds: Type.Optional(
-    Type.Number({ description: "Timeout in seconds (max 120). Default 60." }),
+    Type.Number({ description: "Timeout in seconds. Default 5." }),
   ),
 });
 
@@ -36,12 +36,11 @@ export function createBashTool(workspace: Workspace, options: BashToolOptions = 
       if (!command) throw new Error("command cannot be empty");
 
       const timeoutMs =
-        Math.min(
-          Math.max(
-            Number.isFinite(params.timeoutSeconds) ? (params.timeoutSeconds as number) : 60,
-            1,
-          ),
-          120,
+        Math.max(
+          Number.isFinite(params.timeoutSeconds) && (params.timeoutSeconds as number) > 0
+            ? (params.timeoutSeconds as number)
+            : 5,
+          1,
         ) * 1000;
 
       return await new Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown }>(

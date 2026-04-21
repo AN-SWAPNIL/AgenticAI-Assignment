@@ -4,10 +4,25 @@ This project implements an agentic chat system with a strict control-plane / exe
 
 - Control plane: React UI + Convex state and orchestration.
 - Execution plane: one isolated Daytona sandbox per conversation.
-- Agent runtime: long-lived Pi daemon inside each sandbox, using Gemini (`gemini-2.5-flash`).
+- Agent runtime: long-lived Pi daemon inside each sandbox, powered by `pi-agent-core` + `pi-ai` model adapters.
 - Conversation-scoped file lifecycle: user upload to sandbox, agent-exported downloadable artifacts, and full file history.
 
 The goal is to satisfy the assignment requirement that the agent executes inside an isolated VM while preserving good observability (timeline, tool history, run state, and raw events).
+
+## Assignment Requirement Mapping
+
+| Assignment requirement | Status | Where implemented |
+| --- | --- | --- |
+| Basic chat UI (new thread, send/receive) | Implemented | `src/components/conversation/*`, `src/components/chat/*`, `src/App.tsx` |
+| Progressive streaming responses | Implemented | `agent/src/runLoop.ts` (`appendAssistantDelta`), `convex/ingest.ts`, `src/components/chat/MessageBubble.tsx` |
+| One Daytona VM/session per conversation | Implemented | `convex/orchestrator.ts`, `convex/conversations.ts` |
+| Pi Agent runs inside Daytona (not control plane) | Implemented | `agent/src/agentHost.ts`, `scripts/bundle-runtime.mjs`, `convex/orchestrator.ts` |
+| Control plane vs execution plane separation | Implemented | Control: React + Convex (`src/*`, `convex/*.ts`), Execution: daemon + tools (`agent/src/*`) |
+| Required tools: `bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`, `websearch` | Implemented | `agent/src/tools/*.ts`, registered in `agent/src/tools/index.ts` |
+| Structured tool outputs + streaming where feasible | Implemented | tool `content + details` pattern in `agent/src/tools/*`; live shell chunk streaming via `appendToolOutput` |
+| Convex backend for DB/API/state/session mapping | Implemented | `convex/schema.ts`, `convex/conversations.ts`, `convex/ingest.ts`, `convex/orchestrator.ts` |
+| Observability: messages + tool history + execution order | Implemented | `messages`, `toolExecutions`, `timelineEvents`; UI in `MessageBubble`, `TimelineView`, `InlineToolCall` |
+| README with architecture, interactions, tradeoffs, env vars | Implemented | This document (`README.md`) + `.env.example` |
 
 ## Architecture
 
@@ -15,7 +30,7 @@ This system is intentionally shaped like a tiny remote lab for one agent at a ti
 
 - The Control Tower is the React UI plus Convex. It stores truth, schedules work, and watches everything.
 - The Airlock is the orchestrator path that provisions a sandbox, uploads the runtime, and launches the daemon.
-- The Workshop is the isolated Daytona VM where the Pi agent actually thinks, edits files, runs commands, and talks to Gemini.
+- The Workshop is the isolated Daytona VM where the Pi agent actually thinks, edits files, runs commands, and calls external model/search APIs.
 
 That separation is the whole point of the assignment: the backend should orchestrate the agent, not secretly be the agent.
 
@@ -51,7 +66,7 @@ Think of the system as three rooms:
 | Convex queries/mutations | Control plane | Durable state, run queue, transcript, telemetry persistence | Runs shell commands |
 | Convex Node actions | Control plane | Sandbox lifecycle, daemon bootstrap, daemon revival, teardown | Streams model tokens itself |
 | Daytona sandbox | Execution plane | Isolated compute, filesystem, processes, networking egress | Stores system-of-record state |
-| Pi daemon | Execution plane | Run pickup, tool use, Gemini calls, telemetry emission | Provisions new infrastructure |
+| Pi daemon | Execution plane | Run pickup, tool use, model calls, telemetry emission | Provisions new infrastructure |
 
 ### System Shape
 
@@ -72,7 +87,7 @@ flowchart TB
     SESSION --> DAEMON["Pi daemon"]
     DAEMON --> TOOLS["bash / read / write / edit / grep / glob / webfetch / websearch / share_file"]
     TOOLS --> WORKSPACE["/home/daytona/workspace"]
-    DAEMON --> GEMINI["Gemini 2.5 Flash"]
+    DAEMON --> LLM["Model Provider (via pi-ai)"]
   end
 
   DAEMON -->|"heartbeat + run + tool + timeline mutations"| CONVEX
@@ -140,7 +155,7 @@ sequenceDiagram
   participant UI as React UI
   participant CV as Convex
   participant AG as Pi daemon
-  participant GM as Gemini
+  participant MP as Model provider (pi-ai)
 
   User->>UI: Send message
   UI->>CV: conversations:sendMessage
@@ -150,7 +165,7 @@ sequenceDiagram
   AG->>CV: ingest:claimRun
   CV->>CV: run => running
   AG->>CV: ingest:ensureAssistantMessage
-  AG->>GM: prompt(history + current user turn)
+  AG->>MP: prompt(history + current user turn)
   AG->>CV: appendAssistantDelta
   AG->>CV: appendTimelineEvent
   AG->>CV: startToolExecution / finishToolExecution
@@ -297,7 +312,7 @@ Each table has a different job:
 - All untrusted tool execution lives inside Daytona, not inside Convex or the browser.
 - VM-originated writes require `agentToken` and, for run-bound mutations, `runToken`.
 - Filesystem tools resolve paths through workspace guards so writes stay under the sandbox workspace root.
-- The sandbox uses outbound connectivity to Convex and Gemini; the control plane does not expose shell access back into itself.
+- The sandbox uses outbound connectivity to Convex and external model/search APIs; the control plane does not expose shell access back into itself.
 
 ## Why Long-Lived Daemon (not per-turn spawn)
 
@@ -395,7 +410,8 @@ AgenticAI-Assignment/
 - Node.js 20+
 - Convex account
 - Daytona API key
-- Gemini API key
+- OpenAI API key
+- Gemini API key (currently validated by orchestrator env guard for backward compatibility)
 - Tavily API key (recommended for better web search)
 
 ### Install
@@ -416,6 +432,7 @@ This writes deployment values to `.env.local`.
 
 ```bash
 npx convex env set DAYTONA_API_KEY "..."
+npx convex env set OPENAI_API_KEY "..."
 npx convex env set GEMINI_API_KEY "..."
 npx convex env set TAVILY_API_KEY "..."
 ```
@@ -443,6 +460,7 @@ Open: `http://localhost:5173`
   - `CONVEX_DEPLOYMENT`
 - Convex deployment secrets:
   - `DAYTONA_API_KEY`
+  - `OPENAI_API_KEY`
   - `GEMINI_API_KEY`
   - `TAVILY_API_KEY` (optional, enables Tavily-first `websearch`)
 
@@ -451,7 +469,8 @@ Sandbox daemon receives:
 - `CONVEX_URL`
 - `CONVEX_CONVERSATION_ID`
 - `CONVEX_AGENT_TOKEN`
-- `GEMINI_API_KEY`
+- `OPENAI_API_KEY`
+- `GEMINI_API_KEY` (passed through for compatibility with existing orchestration envs)
 - `TAVILY_API_KEY`
 - `AGENT_WORKSPACE_DIR`
 - `AGENT_MODEL_ID`
@@ -505,14 +524,14 @@ Fix applied:
 ### Message stuck at queued / no timeline
 
 Check:
-- `DAYTONA_API_KEY` and `GEMINI_API_KEY` are set in Convex deployment env.
+- `DAYTONA_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY` are set in Convex deployment env.
 - conversation has `sandboxId`, `sessionId`, and recent `lastHeartbeatAt`.
 - `npx convex dev --once` pushed latest backend.
 
-### Gemini `429 RESOURCE_EXHAUSTED` / quota exhausted
+### Provider `429` / quota exhausted
 
 Cause:
-- Gemini project/model quota exceeded.
+- Active model provider quota exceeded (most commonly OpenAI rate limits in this build).
 
 Current behavior:
 - run finalizes with readable error text
@@ -564,9 +583,9 @@ This design optimizes for clarity, isolation, and observability over raw through
    - Best part: the exact daemon code that Daytona receives is versioned and reproducible.
    - Cost: developers must remember to rebuild the bundle when runtime code changes.
 
-7. Gemini 2.5 Flash as default model
-   - Best part: fast and cheap enough for iterative demos.
-   - Cost: free-tier quota limits can become the dominant source of failure in development.
+7. Provider-specific model defaults
+   - Best part: model choice is per-conversation and can be changed without rebuilding runtime.
+   - Cost: provider key/config drift can cause launch/runtime failures if env is incomplete.
 
 ## Useful Commands
 

@@ -137,7 +137,9 @@ export default defineSchema({
     type: v.string(),
     payloadJson: v.string(),
     createdAt: v.number(),
-  }).index("by_run_sequence", ["runId", "sequence"]),
+  })
+    .index("by_run_sequence", ["runId", "sequence"])
+    .index("by_conversationId_and_createdAt", ["conversationId", "createdAt"]),
 
   /**
    * Conversation-scoped file lifecycle across planes.

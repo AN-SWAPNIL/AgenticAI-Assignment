@@ -40,6 +40,66 @@ async function resolveSessionFiles(
   return results.filter((r): r is SessionFileView => r !== null);
 }
 
+/**
+ * New user turn interrupts older in-flight runs for the same conversation.
+ * This keeps the UX responsive and prevents stale runs from streaming forever.
+ */
+async function supersedeInFlightRuns(
+  ctx: MutationCtx,
+  conversationId: Id<"conversations">,
+  now: number,
+): Promise<boolean> {
+  const statuses: Array<Doc<"runs">["status"]> = ["queued", "claimed", "running"];
+  let supersededAny = false;
+
+  for (const status of statuses) {
+    const runs = await ctx.db
+      .query("runs")
+      .withIndex("by_conv_status", (q) =>
+        q.eq("conversationId", conversationId).eq("status", status),
+      )
+      .collect();
+
+    for (const run of runs) {
+      supersededAny = true;
+      await ctx.db.patch(run._id, {
+        status: "error",
+        error: "Superseded by a newer user message",
+        completedAt: now,
+      });
+
+      if (run.assistantMessageId) {
+        const assistant = await ctx.db.get(run.assistantMessageId);
+        if (assistant) {
+          await ctx.db.patch(run.assistantMessageId, {
+            status: "completed",
+            content:
+              assistant.content.trim().length > 0
+                ? assistant.content
+                : "[Superseded by newer message]",
+          });
+        }
+      }
+
+      const tools = await ctx.db
+        .query("toolExecutions")
+        .withIndex("by_run_sequence", (q) => q.eq("runId", run._id))
+        .collect();
+      for (const tool of tools) {
+        if (tool.status !== "running") continue;
+        await ctx.db.patch(tool._id, {
+          status: "error",
+          errorText: "Superseded by newer message",
+          completedAt: now,
+          durationMs: Math.max(0, now - tool.startedAt),
+        });
+      }
+    }
+  }
+
+  return supersededAny;
+}
+
 // ─── queries ────────────────────────────────────────────────────────────────
 
 export const list = query({
@@ -180,6 +240,25 @@ export const timelineEvents = query({
   },
 });
 
+/**
+ * Conversation-wide timeline stream for rendering ordered assistant phases in chat bubbles.
+ */
+export const timelineEventsForConversation = query({
+  args: {
+    conversationId: v.id("conversations"),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, { conversationId, limit }): Promise<Doc<"timelineEvents">[]> => {
+    const bounded = Math.min(4000, Math.max(1, limit ?? 2000));
+    const rows = await ctx.db
+      .query("timelineEvents")
+      .withIndex("by_conversationId_and_createdAt", (q) => q.eq("conversationId", conversationId))
+      .order("desc")
+      .take(bounded);
+    return rows.reverse();
+  },
+});
+
 // ─── user-facing mutations ──────────────────────────────────────────────────
 
 export const create = mutation({
@@ -257,13 +336,22 @@ export const sendMessage = mutation({
       throw new Error("Conversation not found");
     }
 
+    const now = Date.now();
+    const superseded = await supersedeInFlightRuns(ctx, conversationId, now);
+    if (superseded) {
+      await ctx.db.patch(conversationId, {
+        status: "idle",
+        lastError: undefined,
+        updatedAt: now,
+      });
+    }
+
     const priorMessages = await ctx.db
       .query("messages")
       .withIndex("by_conversation_order", (q) => q.eq("conversationId", conversationId))
       .take(500);
     const nextOrder = priorMessages.length;
 
-    const now = Date.now();
     const hasPriorUserMessage = priorMessages.some((message) => message.role === "user");
 
     const userMessageId = await ctx.db.insert("messages", {

@@ -288,9 +288,10 @@ export const reviveDaemonIfDead = action({
     }
 
     // Allow revive from any state: explicit user action should always attempt re-launch.
-    // Exception: only skip if heartbeat is fresh AND status is idle (daemon genuinely alive).
+    // Exception: only skip when daemon is fresh+idle AND already on current runtime.
     const fresh = Date.now() - (conversation.lastHeartbeatAt ?? 0) < STALE_HEARTBEAT_MS;
-    if (fresh && conversation.status === "idle") {
+    const runtimeMatches = conversation.runtimeVersion === RUNTIME_VERSION;
+    if (fresh && conversation.status === "idle" && runtimeMatches) {
       return { revived: false, reason: "heartbeat-fresh" };
     }
 

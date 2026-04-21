@@ -1,22 +1,42 @@
 import clsx from "clsx";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "../../lib/markdown";
-import { formatChatTime, formatDuration } from "../../lib/formatters";
-import type { MessageView, SessionFileView, ToolExecution } from "../../types";
+import { formatChatTime } from "../../lib/formatters";
+import type { MessageView, SessionFileView, TimelineEvent, ToolExecution } from "../../types";
 import { InlineFileArtifact } from "./InlineFileArtifact";
 import { InlineToolCall } from "./InlineToolCall";
 
 interface MessageBubbleProps {
   message: MessageView;
+  timelineEvents: TimelineEvent[];
   toolExecutions: ToolExecution[];
   fileArtifacts: SessionFileView[];
 }
 
-export function MessageBubble({ message, toolExecutions, fileArtifacts }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  timelineEvents,
+  toolExecutions,
+  fileArtifacts,
+}: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isStreaming = message.status === "streaming" || message.status === "pending";
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [showTime, setShowTime] = useState(false);
+  const serialPhases = useMemo(
+    () =>
+      !isUser
+        ? buildSerialPhases({
+            events: timelineEvents,
+            executions: toolExecutions,
+            files: fileArtifacts,
+            fallbackThinking: message.thinkingContent ?? "",
+            fallbackOutput: message.content,
+          })
+        : [],
+    [isUser, timelineEvents, toolExecutions, fileArtifacts, message.thinkingContent, message.content],
+  );
+  const hasAssistantPhases = serialPhases.length > 0;
 
   return (
     <>
@@ -59,15 +79,40 @@ export function MessageBubble({ message, toolExecutions, fileArtifacts }: Messag
               </div>
             ) : null}
 
-            {!isUser && message.thinkingContent ? <ThinkingBlock content={message.thinkingContent} /> : null}
+            {!isUser
+              ? serialPhases.map((phase) => {
+                  if (phase.kind === "tools") {
+                    return (
+                      <div key={phase.key} className="space-y-1">
+                        {phase.executions.map((execution) => (
+                          <InlineToolCall key={execution._id} execution={execution} />
+                        ))}
+                      </div>
+                    );
+                  }
+                  if (phase.kind === "thinking") {
+                    return <ThinkingBlock key={phase.key} content={phase.content} isStreaming={isStreaming} />;
+                  }
+                  if (phase.kind === "files") {
+                    return (
+                      <div key={phase.key} className="mt-2 space-y-1">
+                        {phase.files.map((file) => (
+                          <InlineFileArtifact key={file._id} file={file} />
+                        ))}
+                      </div>
+                    );
+                  }
+                  return (
+                    <div key={phase.key} className="text-[15px] leading-relaxed">
+                      <Markdown>{phase.content}</Markdown>
+                    </div>
+                  );
+                })
+              : null}
 
-            {message.content.length > 0 && message.content !== "(file)" ? (
-              isUser ? (
-                <p className="whitespace-pre-wrap text-[15px] leading-relaxed">{message.content}</p>
-              ) : (
-                <Markdown>{message.content}</Markdown>
-              )
-            ) : !isUser ? (
+            {isUser ? (
+              <p className="whitespace-pre-wrap text-[15px] leading-relaxed">{message.content}</p>
+            ) : !hasAssistantPhases ? (
               <p className="text-sm italic text-ink-soft">
                 {message.status === "error" ? "(no response)" : "Thinking..."}
               </p>
@@ -77,17 +122,6 @@ export function MessageBubble({ message, toolExecutions, fileArtifacts }: Messag
               <span aria-hidden className="inline-block h-3 w-[5px] animate-blink bg-accent" />
             ) : null}
 
-            {!isUser && fileArtifacts.length > 0 ? (
-              <div className="mt-2 space-y-1">
-                {fileArtifacts.map((file) => (
-                  <InlineFileArtifact key={file._id} file={file} />
-                ))}
-              </div>
-            ) : null}
-
-            {!isUser && toolExecutions.length > 0 ? (
-              <ToolCallsGroup executions={toolExecutions} isRunning={isStreaming} />
-            ) : null}
           </div>
 
           <span
@@ -109,59 +143,366 @@ export function MessageBubble({ message, toolExecutions, fileArtifacts }: Messag
   );
 }
 
-function ToolCallsGroup({
-  executions,
-  isRunning,
-}: {
+type SerialPhase =
+  | { kind: "thinking"; key: string; content: string }
+  | { kind: "tools"; key: string; executions: ToolExecution[] }
+  | { kind: "output"; key: string; content: string }
+  | { kind: "files"; key: string; files: SessionFileView[] };
+
+function buildSerialPhases(opts: {
+  events: TimelineEvent[];
   executions: ToolExecution[];
-  isRunning: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const totalMs = executions.reduce((s, e) => s + (e.durationMs ?? 0), 0);
-  const uniqueNames = [...new Set(executions.map((e) => e.toolName))];
-  const namesSummary = uniqueNames.slice(0, 3).join(", ") + (uniqueNames.length > 3 ? "..." : "");
+  files: SessionFileView[];
+  fallbackThinking: string;
+  fallbackOutput: string;
+}): SerialPhase[] {
+  const phases: SerialPhase[] = [];
+  const executionBySequence = new Map(opts.executions.map((execution) => [execution.sequence, execution]));
+  const filesById = new Map(opts.files.map((file) => [String(file._id), file]));
+  const usedExecutionIds = new Set<string>();
+  const usedFileIds = new Set<string>();
+  const sortedEvents = [...opts.events].sort((a, b) => a.sequence - b.sequence);
 
-  useEffect(() => {
-    if (isRunning) setOpen(true);
-  }, [isRunning]);
+  let thinkingBuffer = "";
+  let outputBuffer = "";
+  let toolsBuffer: ToolExecution[] = [];
+  let filesBuffer: SessionFileView[] = [];
+  let lastThinkingSnapshot = "";
+  let lastTextSnapshot = "";
 
+  const flushThinking = () => {
+    if (!thinkingBuffer.trim()) return;
+    phases.push({
+      kind: "thinking",
+      key: `thinking-${phases.length + 1}`,
+      content: thinkingBuffer,
+    });
+    thinkingBuffer = "";
+  };
+
+  const flushOutput = () => {
+    if (!outputBuffer) return;
+    phases.push({
+      kind: "output",
+      key: `output-${phases.length + 1}`,
+      content: outputBuffer,
+    });
+    outputBuffer = "";
+  };
+
+  const flushTools = () => {
+    if (toolsBuffer.length === 0) return;
+    phases.push({
+      kind: "tools",
+      key: `tools-${phases.length + 1}`,
+      executions: toolsBuffer,
+    });
+    toolsBuffer = [];
+  };
+
+  const flushFiles = () => {
+    if (filesBuffer.length === 0) return;
+    phases.push({
+      kind: "files",
+      key: `files-${phases.length + 1}`,
+      files: filesBuffer,
+    });
+    filesBuffer = [];
+  };
+
+  let sawThinkingDelta = false;
+  let sawTextDelta = false;
+
+  for (const event of sortedEvents) {
+    const assistantDeltas = extractAssistantDeltas(event);
+    if (assistantDeltas.length > 0) {
+      for (const assistantDelta of assistantDeltas) {
+        const isSnapshot = assistantDelta.source === "snapshot";
+        if (assistantDelta.kind === "thinking") {
+          const normalizedDelta = isSnapshot
+            ? suffixFromSnapshot(lastThinkingSnapshot, assistantDelta.delta)
+            : assistantDelta.delta;
+          if (isSnapshot) {
+            lastThinkingSnapshot = assistantDelta.delta;
+          }
+          if (!normalizedDelta.trim()) continue;
+          if (assistantDelta.source === "snapshot" && sawThinkingDelta) continue;
+          if (assistantDelta.source === "delta") sawThinkingDelta = true;
+          flushOutput();
+          flushTools();
+          flushFiles();
+          thinkingBuffer += normalizedDelta;
+          continue;
+        }
+
+        const normalizedDelta = isSnapshot
+          ? suffixFromSnapshot(lastTextSnapshot, assistantDelta.delta)
+          : assistantDelta.delta;
+        if (isSnapshot) {
+          lastTextSnapshot = assistantDelta.delta;
+        }
+        if (!normalizedDelta) continue;
+        if (assistantDelta.source === "snapshot" && sawTextDelta) continue;
+        if (assistantDelta.source === "delta") sawTextDelta = true;
+        flushThinking();
+        flushTools();
+        flushFiles();
+        outputBuffer += normalizedDelta;
+      }
+      continue;
+    }
+
+    if (event.type === "tool_execution_start") {
+      flushThinking();
+      flushOutput();
+      flushFiles();
+      const execution =
+        executionBySequence.get(event.sequence) ??
+        executionBySequence.get(event.sequence + 1) ??
+        executionBySequence.get(event.sequence - 1) ??
+        opts.executions.find((candidate) => !usedExecutionIds.has(candidate._id));
+      if (execution && !usedExecutionIds.has(execution._id)) {
+        toolsBuffer.push(execution);
+        usedExecutionIds.add(execution._id);
+      }
+      continue;
+    }
+
+    const sharedFileId = extractSharedFileId(event);
+    if (sharedFileId) {
+      flushThinking();
+      flushOutput();
+      flushTools();
+      const file = filesById.get(sharedFileId);
+      if (file && !usedFileIds.has(String(file._id))) {
+        filesBuffer.push(file);
+        usedFileIds.add(String(file._id));
+      }
+      continue;
+    }
+
+    if (thinkingBuffer.length > 0 && event.type !== "message_update") {
+      flushThinking();
+    }
+
+    if (outputBuffer.length > 0 && event.type !== "message_update") {
+      flushOutput();
+    }
+
+    if (toolsBuffer.length > 0 && event.type !== "tool_execution_end") {
+      flushTools();
+    }
+
+    if (filesBuffer.length > 0 && event.type !== "file_share_requested") {
+      flushFiles();
+    }
+  }
+
+  flushThinking();
+  flushOutput();
+  flushTools();
+  flushFiles();
+
+  const unmatchedExecutions = opts.executions.filter((execution) => !usedExecutionIds.has(execution._id));
+  if (unmatchedExecutions.length > 0) {
+    phases.push({
+      kind: "tools",
+      key: `tools-fallback-${phases.length + 1}`,
+      executions: unmatchedExecutions,
+    });
+  }
+
+  const unmatchedFiles = opts.files.filter((file) => !usedFileIds.has(String(file._id)));
+  if (unmatchedFiles.length > 0) {
+    phases.push({
+      kind: "files",
+      key: `files-fallback-${phases.length + 1}`,
+      files: unmatchedFiles,
+    });
+  }
+
+  if (
+    !phases.some((phase) => phase.kind === "thinking") &&
+    opts.fallbackThinking.trim().length > 0
+  ) {
+    phases.push({
+      kind: "thinking",
+      key: `thinking-fallback-${phases.length + 1}`,
+      content: opts.fallbackThinking,
+    });
+  }
+
+  const hasOutputPhase = phases.some((phase) => phase.kind === "output");
+  if (!hasOutputPhase && opts.fallbackOutput.length > 0 && opts.fallbackOutput !== "(file)") {
+    phases.push({
+      kind: "output",
+      key: `output-fallback-${phases.length + 1}`,
+      content: opts.fallbackOutput,
+    });
+  }
+
+  return phases;
+}
+
+type AssistantDelta =
+  | { kind: "thinking"; delta: string; source: "delta" | "snapshot" }
+  | { kind: "text"; delta: string; source: "delta" | "snapshot" };
+
+function extractAssistantDeltas(event: TimelineEvent): AssistantDelta[] {
+  let payload: Record<string, unknown> | null = null;
+  try {
+    payload = JSON.parse(event.payloadJson) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+
+  const deltas: AssistantDelta[] = [];
+
+  const messageUpdateEvent =
+    asRecord(payload.assistantMessageEvent) ?? asRecord(payload.messageEvent);
+  if (messageUpdateEvent) {
+    const updateType = String(messageUpdateEvent.type ?? "");
+    const delta = messageUpdateEvent.delta;
+    if (typeof delta === "string" && isThinkingDeltaType(updateType)) {
+      deltas.push({ kind: "thinking", delta, source: "delta" });
+    }
+    if (typeof delta === "string" && isTextDeltaType(updateType)) {
+      deltas.push({ kind: "text", delta, source: "delta" });
+    }
+    if (deltas.length > 0) {
+      return deltas;
+    }
+  }
+
+  if (event.type !== "message_end" && event.type !== "turn_end") {
+    return [];
+  }
+
+  const message = asRecord(payload.message);
+  if (!message || String(message.role ?? "") !== "assistant") {
+    return [];
+  }
+
+  const snapshotSegments = extractAssistantSegmentsFromMessage(message);
+  return snapshotSegments.map((segment) => ({ ...segment, source: "snapshot" }));
+}
+
+function extractAssistantSegmentsFromMessage(message: Record<string, unknown>): Array<{
+  kind: "thinking" | "text";
+  delta: string;
+}> {
+  const out: Array<{ kind: "thinking" | "text"; delta: string }> = [];
+  const content = Array.isArray(message.content) ? message.content : [];
+
+  for (const part of content) {
+    const record = asRecord(part);
+    if (!record) continue;
+
+    const partType = String(record.type ?? "").toLowerCase();
+    const text = isThinkingPartType(partType)
+      ? extractThinkingText(record)
+      : firstString(record.text, record.delta, record.content, record.value);
+    if (!text) continue;
+
+    if (isThinkingPartType(partType)) {
+      out.push({ kind: "thinking", delta: text });
+    } else {
+      out.push({ kind: "text", delta: text });
+    }
+  }
+
+  if (out.length === 0) {
+    const fallbackThinking = firstString(
+      message.thinking,
+      message.thinkingContent,
+      message.reasoning,
+      message.thought,
+    );
+    if (fallbackThinking) {
+      out.push({ kind: "thinking", delta: fallbackThinking });
+    }
+
+    const fallbackText = firstString(message.text, message.output, message.response);
+    if (fallbackText) {
+      out.push({ kind: "text", delta: fallbackText });
+    }
+  }
+
+  return out;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  return value as Record<string, unknown>;
+}
+
+function suffixFromSnapshot(previous: string, current: string): string {
+  if (!current) return "";
+  if (!previous) return current;
+  if (current === previous) return "";
+  if (current.startsWith(previous)) return current.slice(previous.length);
+  if (previous.startsWith(current)) return "";
+  return current;
+}
+
+function extractThinkingText(record: Record<string, unknown>): string {
+  const primary = firstString(record.thinking, record.text, record.delta, record.content, record.value);
+  if (primary) return primary;
+  const summary = Array.isArray(record.summary) ? record.summary : [];
+  const summaryText = summary
+    .map((entry) => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    .map((entry) => firstString(entry.text, entry.summary))
+    .filter(Boolean)
+    .join("\n\n");
+  return summaryText;
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function isThinkingDeltaType(type: string): boolean {
+  const normalized = type.toLowerCase();
+  return normalized.includes("thinking_delta") || normalized.includes("reasoning_delta");
+}
+
+function isTextDeltaType(type: string): boolean {
+  const normalized = type.toLowerCase();
+  return normalized.includes("text_delta");
+}
+
+function isThinkingPartType(type: string): boolean {
+  const normalized = type.toLowerCase();
   return (
-    <div className="mt-2 overflow-hidden rounded-lg border border-border/60 bg-surface-0/50">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-ink-soft hover:bg-surface-2/50 transition-colors"
-      >
-        <span className={clsx("text-[11px]", isRunning && "animate-pulse text-warning")}>
-          {isRunning ? "..." : open ? "v" : ">"}
-        </span>
-        <span className="font-medium text-ink">
-          {executions.length} tool call{executions.length !== 1 ? "s" : ""}
-        </span>
-        {!isRunning ? (
-          <>
-            <span className="text-ink-soft/40">|</span>
-            <span className="min-w-0 flex-1 truncate">{namesSummary}</span>
-            <span className="shrink-0 font-mono text-[10px]">{formatDuration(totalMs)}</span>
-          </>
-        ) : (
-          <span className="animate-pulse text-warning">Running...</span>
-        )}
-      </button>
-      {open ? (
-        <div className="border-t border-border/40 px-2 pb-2 pt-1">
-          {executions.map((execution) => (
-            <InlineToolCall key={execution._id} execution={execution} />
-          ))}
-        </div>
-      ) : null}
-    </div>
+    normalized.includes("thinking") ||
+    normalized.includes("reasoning") ||
+    normalized.includes("thought")
   );
 }
 
-function ThinkingBlock({ content }: { content: string }) {
-  const [open, setOpen] = useState(false);
+function extractSharedFileId(event: TimelineEvent): string | null {
+  if (event.type !== "file_share_requested") return null;
+  try {
+    const payload = JSON.parse(event.payloadJson) as { sessionFileId?: unknown };
+    return typeof payload.sessionFileId === "string" ? payload.sessionFileId : null;
+  } catch {
+    return null;
+  }
+}
+
+function ThinkingBlock({ content, isStreaming }: { content: string; isStreaming: boolean }) {
+  const [open, setOpen] = useState(isStreaming);
   const lines = content.trim().split("\n").length;
+
+  useEffect(() => {
+    if (isStreaming) setOpen(true);
+  }, [isStreaming]);
 
   return (
     <div className="mb-2 overflow-hidden rounded-lg border border-border/50 bg-surface-0/60 text-[12px]">
@@ -171,7 +512,9 @@ function ThinkingBlock({ content }: { content: string }) {
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-ink-soft hover:bg-surface-2/50 transition-colors"
       >
         <span className="text-[11px]">{open ? "v" : ">"}</span>
-        <span className="italic">Thought for {lines} line{lines !== 1 ? "s" : ""}</span>
+        <span className="italic">
+          {isStreaming ? "Thinking live" : "Thought"} for {lines} line{lines !== 1 ? "s" : ""}
+        </span>
         <span className="ml-auto text-[10px] text-ink-soft/50">{open ? "Collapse" : "Expand"}</span>
       </button>
       {open ? (

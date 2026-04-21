@@ -7,6 +7,7 @@ import type {
   MessageView,
   RunId,
   SessionFileView,
+  TimelineEvent,
   ToolExecution,
 } from "../../types";
 import { MessageBubble } from "./MessageBubble";
@@ -43,6 +44,10 @@ export function MessageList({
       ? { conversationId, q: debouncedQuery.trim() }
       : "skip",
   );
+  const conversationTimelineEvents = useQuery(
+    api.conversations.timelineEventsForConversation,
+    conversationId ? { conversationId, limit: 3000 } : "skip",
+  );
 
   const searchResultIds = useMemo(
     () => new Set(searchResults?.map((m) => m._id) ?? []),
@@ -71,6 +76,17 @@ export function MessageList({
     for (const list of byRun.values()) list.sort((a, b) => a.createdAt - b.createdAt);
     return byRun;
   }, [sessionFiles]);
+
+  const timelineByRun = useMemo(() => {
+    const byRun = new Map<string, TimelineEvent[]>();
+    for (const event of conversationTimelineEvents ?? []) {
+      const list = byRun.get(event.runId) ?? [];
+      list.push(event);
+      byRun.set(event.runId, list);
+    }
+    for (const list of byRun.values()) list.sort((a, b) => a.sequence - b.sequence);
+    return byRun;
+  }, [conversationTimelineEvents]);
 
   const sortedMessages = useMemo(
     () => [...messages].sort((a, b) => a.order - b.order),
@@ -165,6 +181,11 @@ export function MessageList({
                 >
                   <MessageBubble
                     message={message}
+                    timelineEvents={
+                      message.role === "assistant" && message.runId
+                        ? timelineByRun.get(message.runId) ?? []
+                        : []
+                    }
                     toolExecutions={
                       message.role === "assistant" && message.runId
                         ? toolsByRun.get(message.runId) ?? []

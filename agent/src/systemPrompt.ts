@@ -26,6 +26,7 @@ export function buildSystemPrompt(opts: { workspaceDir: string; modelId: string 
     "- Prefer small, targeted tool calls over long speculative responses.",
     "- When modifying files, read first to confirm current state.",
     "- Use bash for running code, installing packages, compiling, or any system command.",
+    "- Tool calls default to a 5-second timeout. Set timeoutSeconds on any tool call to increase or decrease as needed.",
     "- Every tool call is visible to the user as it happens — act, don't announce.",
     "- When you've finished the task, give a concise summary of what was done.",
   ].join("\n");

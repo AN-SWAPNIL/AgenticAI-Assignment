@@ -155,6 +155,7 @@ export const claimRun = mutation({
     runToken: string;
     userMessageId: Id<"messages">;
     modelId: string;
+    thinkingLevel: string | undefined;
     userMessageContent: string;
     attachmentUrls: string[];
     attachedFiles: Array<{ name: string; contentType: string; sandboxPath: string | null; status: string }>;
@@ -213,6 +214,7 @@ export const claimRun = mutation({
       runToken: run.runToken,
       userMessageId: run.userMessageId,
       modelId: conversation?.modelId ?? "gemini-2.5-flash",
+      thinkingLevel: conversation?.thinkingLevel,
       userMessageContent: userMessage.content,
       attachmentUrls,
       attachedFiles,
@@ -319,6 +321,30 @@ export const syncThinkingContent = mutation({
   },
 });
 
+export const appendThinkingDelta = mutation({
+  args: {
+    runId: v.id("runs"),
+    runToken: v.string(),
+    messageId: v.id("messages"),
+    chunk: v.string(),
+  },
+  handler: async (ctx, { runId, runToken, messageId, chunk }) => {
+    const run = await requireRun(ctx, runId, runToken);
+    if (!canAcceptRuntimeUpdates(run)) {
+      return { accepted: false as const };
+    }
+    const message = await ctx.db.get(messageId);
+    if (!message || message.runId !== runId) {
+      throw new Error("Message does not belong to this run");
+    }
+    await ctx.db.patch(messageId, {
+      thinkingContent: (message.thinkingContent ?? "") + chunk,
+    });
+    await ctx.db.patch(run.conversationId, { updatedAt: Date.now() });
+    return { accepted: true as const };
+  },
+});
+
 export const startToolExecution = mutation({
   args: {
     runId: v.id("runs"),
@@ -366,13 +392,24 @@ export const finishToolExecution = mutation({
     if (!canAcceptRuntimeUpdates(run)) {
       return { accepted: false as const };
     }
-    await ctx.db.patch(toolExecutionId, {
+    const patch: {
+      status: "success" | "error";
+      durationMs: number;
+      completedAt: number;
+      outputText?: string;
+      errorText?: string;
+    } = {
       status,
-      outputText,
-      errorText,
       durationMs,
       completedAt: Date.now(),
-    });
+    };
+    if (typeof outputText === "string") {
+      patch.outputText = outputText;
+    }
+    if (typeof errorText === "string") {
+      patch.errorText = errorText;
+    }
+    await ctx.db.patch(toolExecutionId, patch);
     return { accepted: true as const };
   },
 });
@@ -422,6 +459,20 @@ export const finalizeRun = mutation({
       completedAt: now,
     });
 
+    const toolExecutions = await ctx.db
+      .query("toolExecutions")
+      .withIndex("by_run_sequence", (q) => q.eq("runId", runId))
+      .collect();
+    for (const tool of toolExecutions) {
+      if (tool.status !== "running") continue;
+      await ctx.db.patch(tool._id, {
+        status: "error",
+        errorText: error ?? "Run ended before tool completion",
+        completedAt: now,
+        durationMs: Math.max(0, now - tool.startedAt),
+      });
+    }
+
     if (run.assistantMessageId) {
       const assistantPatch: {
         status: "completed" | "error";
@@ -462,6 +513,19 @@ export const cancelRun = mutation({
     await ctx.db.patch(runId, { status: "error", error: "Cancelled by user", completedAt: now });
     if (run.assistantMessageId) {
       await ctx.db.patch(run.assistantMessageId, { status: "completed", content: "[Cancelled]" });
+    }
+    const toolExecutions = await ctx.db
+      .query("toolExecutions")
+      .withIndex("by_run_sequence", (q) => q.eq("runId", runId))
+      .collect();
+    for (const tool of toolExecutions) {
+      if (tool.status !== "running") continue;
+      await ctx.db.patch(tool._id, {
+        status: "error",
+        errorText: "Cancelled by user",
+        completedAt: now,
+        durationMs: Math.max(0, now - tool.startedAt),
+      });
     }
     await ctx.db.patch(run.conversationId, { status: "idle", updatedAt: now });
     return { accepted: true as const };
@@ -513,6 +577,19 @@ export const forceErrorRun = internalMutation({
     if (!run || run.status === "completed" || run.status === "error") return;
     const now = Date.now();
     await ctx.db.patch(runId, { status: "error", error, completedAt: now });
+    const toolExecutions = await ctx.db
+      .query("toolExecutions")
+      .withIndex("by_run_sequence", (q) => q.eq("runId", runId))
+      .collect();
+    for (const tool of toolExecutions) {
+      if (tool.status !== "running") continue;
+      await ctx.db.patch(tool._id, {
+        status: "error",
+        errorText: error,
+        completedAt: now,
+        durationMs: Math.max(0, now - tool.startedAt),
+      });
+    }
     if (run.assistantMessageId) {
       await ctx.db.patch(run.assistantMessageId, { status: "error" });
     }
@@ -523,12 +600,13 @@ export const requestFileExport = mutation({
   args: {
     runId: v.id("runs"),
     runToken: v.string(),
+    sequence: v.optional(v.number()),
     path: v.string(),
     displayName: v.optional(v.string()),
   },
   handler: async (
     ctx,
-    { runId, runToken, path, displayName },
+    { runId, runToken, sequence, path, displayName },
   ): Promise<{ sessionFileId: Id<"sessionFiles"> }> => {
     const run = await requireRun(ctx, runId, runToken);
     const conversation = await ctx.db.get(run.conversationId);
@@ -539,21 +617,61 @@ export const requestFileExport = mutation({
     const sandboxPath = normalizeExportPath(conversation.workspaceDir, path);
     const now = Date.now();
     const preferredName = displayName?.trim() || fileBasename(sandboxPath);
-    const sessionFileId = await ctx.db.insert("sessionFiles", {
+    const existing = (await ctx.db
+      .query("sessionFiles")
+      .withIndex("by_conversationId_and_runId", (q) =>
+        q.eq("conversationId", run.conversationId).eq("runId", runId),
+      )
+      .collect())
+      .find(
+        (file) =>
+          file.direction === "download" &&
+          file.source === "agent" &&
+          file.sandboxPath === sandboxPath &&
+          file.status !== "error",
+      );
+
+    const sessionFileId =
+      existing?._id ??
+      (await ctx.db.insert("sessionFiles", {
+        conversationId: run.conversationId,
+        runId,
+        direction: "download",
+        source: "agent",
+        status: "queued",
+        displayName: sanitizeDisplayName(preferredName),
+        sandboxPath,
+        createdAt: now,
+        updatedAt: now,
+      }));
+
+    const resolvedSequence =
+      typeof sequence === "number"
+        ? sequence
+        : ((await ctx.db
+            .query("timelineEvents")
+            .withIndex("by_run_sequence", (q) => q.eq("runId", runId))
+            .order("desc")
+            .first())?.sequence ?? 0) + 1;
+
+    await ctx.db.insert("timelineEvents", {
       conversationId: run.conversationId,
       runId,
-      direction: "download",
-      source: "agent",
-      status: "queued",
-      displayName: sanitizeDisplayName(preferredName),
-      sandboxPath,
+      sequence: resolvedSequence,
+      type: "file_share_requested",
+      payloadJson: JSON.stringify({
+        sessionFileId,
+        path: sandboxPath,
+        displayName: sanitizeDisplayName(preferredName),
+      }),
       createdAt: now,
-      updatedAt: now,
     });
 
-    await ctx.scheduler.runAfter(0, internal.fileTransfers.processExportToStorage, {
-      sessionFileId,
-    });
+    if (!existing) {
+      await ctx.scheduler.runAfter(0, internal.fileTransfers.processExportToStorage, {
+        sessionFileId,
+      });
+    }
 
     return { sessionFileId };
   },
