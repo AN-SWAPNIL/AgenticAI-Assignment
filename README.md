@@ -6,7 +6,11 @@ The project is intentionally designed for the assignment goal: architecture clar
 
 ## Demo
 
-- YouTube: https://youtu.be/4lPLKUCL4Qw
+<a href="https://youtu.be/4lPLKUCL4Qw" target="_blank">
+  <img src="image/README/1776765809879.png" alt="▶ Click to see the video" width="800" />
+</a>
+
+> ▶ [Click to see the video](https://youtu.be/4lPLKUCL4Qw)
 
 ## Assignment Fit (At a Glance)
 
