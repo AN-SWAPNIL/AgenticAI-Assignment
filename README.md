@@ -245,10 +245,10 @@ flowchart LR
 
 Primary observability UI:
 
-- `src/components/observability/TimelineView.tsx`
-- `src/components/observability/ToolHistoryTable.tsx`
-- `src/components/observability/RawEventsDrawer.tsx`
-- `src/components/chat/MessageBubble.tsx`
+- `src/components/observability/ObservabilityPanel.tsx` — tabbed panel container (timeline + files)
+- `src/components/observability/TimelineView.tsx` — ordered timeline of run events
+- `src/components/observability/SessionFilesTable.tsx` — upload/download file ledger
+- `src/components/chat/MessageBubble.tsx` — inline tool call bubbles with streaming output
 
 ## Run State Model
 
@@ -263,7 +263,7 @@ stateDiagram-v2
   error --> [*]
 ```
 
-> **Note:** The `claimed` state (absent in Prev_Readme.md) was added to make run atomicity explicit — the daemon transitions `queued → claimed` in a single mutation before any work begins, preventing double-pickup across concurrently revived daemons.
+> **Note:** The `claimed` state was added to make run atomicity explicit — the daemon transitions `queued → claimed` in a single mutation before any work begins, preventing double-pickup across concurrently revived daemons.
 
 ## Data Model
 
@@ -373,6 +373,7 @@ erDiagram
 ```text
 AgenticAI-Assignment/
   agent/
+    package.json            # runtime deps: pi-agent-core, pi-ai, typebox, convex
     src/
       agentHost.ts          # daemon entry point, Convex subscription loop
       runLoop.ts            # agent turn: prompt, tools, delta emission
@@ -400,21 +401,46 @@ AgenticAI-Assignment/
     sweeperData.ts          # sweeper Convex queries
     crons.ts                # hourly cron registration
     daytonaUtils.ts         # safe sandbox delete helper
-    lib.ts                  # shared utilities
+    lib.ts                  # shared utilities (token generation, title helpers)
     runtime/
       agentHostBundle.generated.ts  # bundled daemon (output of bundle:agent)
   scripts/
-    bundle-runtime.mjs      # esbuild bundle script for agent
+    bundle-runtime.mjs      # esbuild: bundles agent/src/agentHost.ts → convex/runtime/agentHostBundle.generated.ts
+    create-snapshot.mjs     # one-time: pre-bakes a Daytona snapshot with all agent deps pre-installed
   src/
-    App.tsx
+    App.tsx                 # root layout, conversation routing
+    convexClient.ts         # Convex browser client setup
+    types.ts                # shared frontend types
     components/
       chat/
+        ChatPanel.tsx           # message list + composer container
+        Composer.tsx            # user input, file attach, send
+        MessageBubble.tsx       # assistant/user message rendering, inline tool calls
+        MessageList.tsx         # scrollable transcript
+        InlineToolCall.tsx      # per-tool call expansion UI
+        InlineFileArtifact.tsx  # file attachment / download card
       conversation/
+        ConversationList.tsx    # sidebar thread list
+        ConversationItem.tsx    # individual thread row
+        NewConversationButton.tsx
+        SidebarSettings.tsx     # per-conversation model/thinking settings
       layout/
+        AppShell.tsx            # sidebar + main panel shell
+        StatusBar.tsx           # connection/sandbox status indicator
       observability/
+        ObservabilityPanel.tsx  # tabbed panel (timeline + files)
+        TimelineView.tsx        # ordered event timeline
+        SessionFilesTable.tsx   # upload/download file ledger
     hooks/
+      useActiveRun.ts           # subscribe to the current run for a conversation
+      useConversations.ts       # conversation list subscription
+      useKeyboardShortcuts.ts   # keyboard shortcut bindings
     lib/
+      formatters.ts             # date/size/duration formatters
+      markdown.tsx              # react-markdown renderer config
+      modelPreferences.ts       # model id defaults and labels
     styles/
+      globals.css               # Tailwind base + global styles
 ```
 
 ## Setup
@@ -467,9 +493,8 @@ Open: `http://localhost:5173`
 
 ### Local client and dev CLI
 
-- `CONVEX_DEPLOYMENT`
-- `VITE_CONVEX_URL`
-- `VITE_CONVEX_SITE_URL` (optional)
+- `CONVEX_DEPLOYMENT` — set by `npx convex dev` (e.g. `dev:<slug>`)
+- `VITE_CONVEX_URL` — Convex cloud URL (e.g. `https://<slug>.convex.cloud`)
 
 ### Convex deployment secrets
 
@@ -538,9 +563,18 @@ Transfer size policy: 25 MB max for both upload and export.
 ## Useful Commands
 
 ```bash
-npm run dev
-npm run bundle:agent
-npm run check
-npx convex dev --once
-npx convex dev
+# Development
+npm run dev              # starts Convex dev + Vite in parallel (auto-bundles agent first)
+npm run bundle:agent     # re-bundle agent/src/agentHost.ts into convex/runtime/*.generated.ts
+npm run check            # codegen + full typecheck (root + agent)
+
+# Convex
+npx convex dev           # start Convex backend dev server
+npx convex dev --once    # generate types + push schema once, then exit
+
+# Daytona snapshot (one-time setup, optional)
+# Pre-bakes a Daytona image with agent deps pre-installed; cuts cold-start from ~30s → ~5s
+$env:DAYTONA_API_KEY = "dtn_xxx"; node scripts/create-snapshot.mjs
+# Then register the returned snapshot name:
+npx convex env set DAYTONA_SNAPSHOT "agentic-runtime-v3"
 ```
