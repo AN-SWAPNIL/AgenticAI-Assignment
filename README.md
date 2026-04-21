@@ -422,7 +422,6 @@ AgenticAI-Assignment/
 - Daytona API key
 - OpenAI API key
 - Tavily API key (recommended for better websearch)
-- Anthropic API key (optional, for Claude models)
 
 ### Install
 
@@ -442,7 +441,6 @@ npx convex dev
 npx convex env set DAYTONA_API_KEY "dtn_..."
 npx convex env set OPENAI_API_KEY "sk-..."
 npx convex env set TAVILY_API_KEY "tvly-..."        # optional but recommended
-npx convex env set ANTHROPIC_API_KEY "sk-ant-..."   # optional
 npx convex env set DAYTONA_SNAPSHOT "agentic-runtime"  # optional, faster cold start
 ```
 
@@ -474,7 +472,6 @@ Open: `http://localhost:5173`
 - `DAYTONA_API_KEY`
 - `OPENAI_API_KEY`
 - `TAVILY_API_KEY` (optional)
-- `ANTHROPIC_API_KEY` (optional)
 - `DAYTONA_SNAPSHOT` (optional, enables snapshot fast-path)
 - `AGENT_MODEL_ID` (optional, default: `gpt-4.1`)
 
@@ -485,12 +482,11 @@ Open: `http://localhost:5173`
 - `CONVEX_AGENT_TOKEN`
 - `OPENAI_API_KEY`
 - `TAVILY_API_KEY`
-- `ANTHROPIC_API_KEY` (if set)
 - `AGENT_WORKSPACE_DIR`
 - `AGENT_MODEL_ID`
 - `AGENT_THINKING_LEVEL`
 
-> **Change from Prev_Readme.md:** `GEMINI_API_KEY` is no longer required or passed to the daemon. The orchestrator env guard was removed. Default model is `gpt-4.1` (OpenAI). Anthropic support added via `ANTHROPIC_API_KEY`.
+> **Change from Prev_Readme.md:** `GEMINI_API_KEY` is no longer required or passed to the daemon. The orchestrator env guard was removed. Default model is `gpt-4.1` (OpenAI).
 
 ## File Transfer Lifecycle
 
@@ -533,8 +529,8 @@ Transfer size policy: 25 MB max for both upload and export.
    - Pro: cuts sandbox cold-start from ~30 s to ~5 s when `DAYTONA_SNAPSHOT` is set.
    - Con: snapshot image must be maintained separately; fallback to language runtime on miss.
 
-6. **OpenAI-first, multi-provider optional**
-   - Pro: single required key simplifies setup; Anthropic support available via opt-in env var.
+6. **OpenAI-first**
+   - Pro: single required key simplifies setup.
    - Con: model key/config drift can cause launch failures if env is incomplete.
 
 ## Useful Commands
