@@ -31,6 +31,7 @@ export const api = {
         thinkingLevel: string | undefined;
         userMessageContent: string;
         attachmentUrls: string[];
+        imageAttachments: Array<{ url: string; mimeType: string }>;
         attachedFiles: Array<{ name: string; contentType: string; sandboxPath: string | null; status: string }>;
         summaryContext: string | undefined;
       } | null

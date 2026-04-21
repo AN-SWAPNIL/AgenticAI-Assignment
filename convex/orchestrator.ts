@@ -124,7 +124,7 @@ async function bootstrapDaemon(
     convexUrl: string;
     conversationId: string;
     agentToken: string;
-    geminiApiKey: string;
+    openAiApiKey: string;
     tavilyApiKey?: string;
     modelId?: string;
     thinkingLevel?: string;
@@ -156,17 +156,16 @@ async function bootstrapDaemon(
     `${RUNTIME_DIR}/agentHost.mjs`,
   );
 
-  const defaultModel = process.env.AGENT_MODEL_ID?.trim() || "gemini-2.5-flash";
+  const defaultModel = process.env.AGENT_MODEL_ID?.trim() || "gpt-4.1";
   const modelId = env.modelId?.trim() || defaultModel;
 
   const envExports = [
     `export CONVEX_URL=${shellQuote(env.convexUrl)}`,
     `export CONVEX_CONVERSATION_ID=${shellQuote(env.conversationId)}`,
     `export CONVEX_AGENT_TOKEN=${shellQuote(env.agentToken)}`,
-    `export GEMINI_API_KEY=${shellQuote(env.geminiApiKey)}`,
+    `export OPENAI_API_KEY=${shellQuote(env.openAiApiKey)}`,
     ...(env.tavilyApiKey ? [`export TAVILY_API_KEY=${shellQuote(env.tavilyApiKey)}`] : []),
     ...(process.env.ANTHROPIC_API_KEY ? [`export ANTHROPIC_API_KEY=${shellQuote(process.env.ANTHROPIC_API_KEY)}`] : []),
-    ...(process.env.OPENAI_API_KEY ? [`export OPENAI_API_KEY=${shellQuote(process.env.OPENAI_API_KEY)}`] : []),
     `export AGENT_WORKSPACE_DIR=${shellQuote(WORKSPACE_DIR)}`,
     `export AGENT_MODEL_ID=${shellQuote(modelId)}`,
     `export AGENT_THINKING_LEVEL=${shellQuote(env.thinkingLevel || "off")}`,
@@ -208,7 +207,7 @@ export const provisionConversation = action({
     if (!conversation) throw new Error("Conversation not found");
 
     const convexUrl = requiredEnv("CONVEX_CLOUD_URL");
-    const geminiApiKey = requiredEnv("GEMINI_API_KEY");
+    const openAiApiKey = requiredEnv("OPENAI_API_KEY");
     const tavilyApiKey = process.env.TAVILY_API_KEY?.trim() || undefined;
 
     try {
@@ -239,7 +238,7 @@ export const provisionConversation = action({
         convexUrl,
         conversationId: String(conversationId),
         agentToken: conversation.agentToken,
-        geminiApiKey,
+        openAiApiKey,
         tavilyApiKey,
         modelId: conversation.modelId,
         thinkingLevel: conversation.thinkingLevel,
@@ -296,7 +295,7 @@ export const reviveDaemonIfDead = action({
     }
 
     const convexUrl = requiredEnv("CONVEX_CLOUD_URL");
-    const geminiApiKey = requiredEnv("GEMINI_API_KEY");
+    const openAiApiKey = requiredEnv("OPENAI_API_KEY");
     const tavilyApiKey = process.env.TAVILY_API_KEY?.trim() || undefined;
 
     try {
@@ -312,7 +311,7 @@ export const reviveDaemonIfDead = action({
         convexUrl,
         conversationId: String(conversationId),
         agentToken: conversation.agentToken,
-        geminiApiKey,
+        openAiApiKey,
         tavilyApiKey,
         modelId: conversation.modelId,
         thinkingLevel: conversation.thinkingLevel,

@@ -4,7 +4,10 @@ import { Type } from "@sinclair/typebox";
 import type { Workspace } from "../workspace.js";
 
 const WriteParams = Type.Object({
-  path: Type.String({ description: "File path relative to the workspace root." }),
+  path: Type.String({
+    description:
+      "File path to write. Relative paths are resolved under workspace/work/.",
+  }),
   content: Type.String({ description: "Full content to write." }),
   createOnly: Type.Optional(
     Type.Boolean({ description: "If true, fail when the file already exists. Default false." }),
@@ -18,10 +21,10 @@ export function createWriteTool(workspace: Workspace) {
     name: "write",
     label: "write",
     description:
-      "Create or overwrite a file with the given full content. Parent directories are created as needed. Prefer `edit` for small modifications to existing files.",
+      "Create or overwrite a file with the given full content in workspace/work/. Parent directories are created as needed. Prefer `edit` for small modifications to existing files.",
     parameters: WriteParams,
     async execute(_id: string, params: WriteInput) {
-      const resolved = workspace.resolve(params.path);
+      const resolved = workspace.resolveWritable(params.path);
       if (params.createOnly) {
         const exists = await access(resolved).then(
           () => true,

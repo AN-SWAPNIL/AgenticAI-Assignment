@@ -31,6 +31,9 @@ export function createAgentSession(opts: AgentSessionOptions) {
   });
 
   const agent = new Agent({
+    // Sequential execution is more stable for long coding workflows and keeps
+    // timeline/tool ordering deterministic in the UI.
+    toolExecution: "sequential",
     initialState: {
       systemPrompt: buildSystemPrompt({ workspaceDir: opts.workspace.root, modelId: opts.modelId }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

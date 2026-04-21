@@ -53,6 +53,27 @@ function canAcceptRuntimeUpdates(run: Doc<"runs">): boolean {
 
 const DEFAULT_WORKSPACE_DIR = "/home/daytona/workspace";
 
+function inferImageMimeType(contentType: string | undefined, displayName: string): string | null {
+  const normalized = contentType?.trim().toLowerCase();
+  if (normalized?.startsWith("image/")) {
+    const [mimeType = ""] = normalized.split(";");
+    return mimeType.trim() || null;
+  }
+
+  const lowerName = displayName.trim().toLowerCase();
+  if (lowerName.endsWith(".png")) return "image/png";
+  if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) return "image/jpeg";
+  if (lowerName.endsWith(".webp")) return "image/webp";
+  if (lowerName.endsWith(".gif")) return "image/gif";
+  if (lowerName.endsWith(".bmp")) return "image/bmp";
+  if (lowerName.endsWith(".tif") || lowerName.endsWith(".tiff")) return "image/tiff";
+  if (lowerName.endsWith(".svg")) return "image/svg+xml";
+  if (lowerName.endsWith(".heic")) return "image/heic";
+  if (lowerName.endsWith(".heif")) return "image/heif";
+  if (lowerName.endsWith(".avif")) return "image/avif";
+  return null;
+}
+
 function normalizeExportPath(workspaceDir: string | undefined, rawPath: string): string {
   const workspaceRoot = (workspaceDir || DEFAULT_WORKSPACE_DIR).replace(/\/+$/, "");
   const normalizedInput = rawPath.replace(/\\/g, "/").replace(/\s+/g, " ").trim();
@@ -158,6 +179,7 @@ export const claimRun = mutation({
     thinkingLevel: string | undefined;
     userMessageContent: string;
     attachmentUrls: string[];
+    imageAttachments: Array<{ url: string; mimeType: string }>;
     attachedFiles: Array<{ name: string; contentType: string; sandboxPath: string | null; status: string }>;
     summaryContext: string | undefined;
   } | null> => {
@@ -177,6 +199,7 @@ export const claimRun = mutation({
 
     // Resolve session files → image URLs for multimodal + metadata for all files.
     const attachmentUrls: string[] = [];
+    const imageAttachments: Array<{ url: string; mimeType: string }> = [];
     const attachedFiles: Array<{ name: string; contentType: string; sandboxPath: string | null; status: string }> = [];
     if (userMessage.sessionFileIds && userMessage.sessionFileIds.length > 0) {
       const sessionFiles = await Promise.all(
@@ -184,15 +207,19 @@ export const claimRun = mutation({
       );
       for (const sf of sessionFiles) {
         if (!sf) continue;
+        const inferredImageMimeType = inferImageMimeType(sf.contentType, sf.displayName);
         attachedFiles.push({
           name: sf.displayName,
           contentType: sf.contentType ?? "application/octet-stream",
           sandboxPath: sf.sandboxPath ?? null,
           status: sf.status,
         });
-        if (sf.storageId && sf.contentType?.startsWith("image/")) {
+        if (sf.storageId && inferredImageMimeType) {
           const url = await ctx.storage.getUrl(sf.storageId);
-          if (url) attachmentUrls.push(url);
+          if (url) {
+            attachmentUrls.push(url);
+            imageAttachments.push({ url, mimeType: inferredImageMimeType });
+          }
         }
       }
     }
@@ -213,10 +240,11 @@ export const claimRun = mutation({
     return {
       runToken: run.runToken,
       userMessageId: run.userMessageId,
-      modelId: conversation?.modelId ?? "gemini-2.5-flash",
+      modelId: conversation?.modelId ?? "gpt-5-mini",
       thinkingLevel: conversation?.thinkingLevel,
       userMessageContent: userMessage.content,
       attachmentUrls,
+      imageAttachments,
       attachedFiles,
       summaryContext,
     };

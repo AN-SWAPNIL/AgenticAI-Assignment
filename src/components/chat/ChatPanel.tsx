@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, useEffect, useState } from "react";
 import { useMutation } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import type { ActiveRunData } from "../../hooks/useActiveRun";
@@ -18,6 +18,12 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
   composerRef,
 ) {
   const revive = useMutation(api.conversations.revive);
+  const [clockMs, setClockMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setClockMs(Date.now()), 5_000);
+    return () => clearInterval(timer);
+  }, []);
 
   if (!conversationId) {
     return (
@@ -38,7 +44,25 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
   const tools = active.conversationToolExecutions ?? [];
   const sessionFiles = active.sessionFiles ?? [];
   const status = conversation?.status;
-  const canRevive = status === "error" || status === "provisioning";
+  const lastHeartbeatAt = conversation?.lastHeartbeatAt ?? 0;
+  const staleHeartbeat = lastHeartbeatAt === 0 || clockMs - lastHeartbeatAt > 30_000;
+  const latestRun = active.latestRun;
+  const queuedTooLong =
+    latestRun?.status === "queued" && clockMs - latestRun.createdAt > 20_000;
+  const canRevive =
+    status === "error" ||
+    status === "provisioning" ||
+    ((status === "idle" || status === "running") && staleHeartbeat) ||
+    queuedTooLong;
+
+  const reviveTitle =
+    status === "provisioning"
+      ? "Workspace provisioning is stuck"
+      : status === "error"
+        ? "Agent daemon stopped"
+        : queuedTooLong
+          ? "Run is queued too long - daemon may be inactive"
+          : "Daemon heartbeat is stale";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -48,7 +72,7 @@ export const ChatPanel = forwardRef<HTMLTextAreaElement, ChatPanelProps>(functio
             <span className="text-base">!</span>
             <div>
               <p className="text-[13px] font-medium text-danger">
-                {status === "provisioning" ? "Workspace provisioning is stuck" : "Agent daemon stopped"}
+                {reviveTitle}
               </p>
               {conversation?.lastError ? (
                 <p className="text-[11px] text-danger/70">{conversation.lastError}</p>

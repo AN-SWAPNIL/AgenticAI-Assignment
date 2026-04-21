@@ -33,8 +33,28 @@ export function createShareFileTool(workspace: Workspace, hook: ShareFileHook) {
         throw new Error("path cannot be empty");
       }
 
-      const resolved = workspace.resolve(candidate);
-      const details = await stat(resolved);
+      const detailsOrNull = async (filePath: string) =>
+        await stat(filePath).then(
+          (s) => s,
+          () => null,
+        );
+
+      let resolved = workspace.resolve(candidate);
+      let details = await detailsOrNull(resolved);
+      if (!details) {
+        const normalized = candidate.replace(/^\.\/+/, "");
+        if (!normalized.startsWith("work/")) {
+          const fallback = workspace.resolve(`work/${normalized}`);
+          const fallbackDetails = await detailsOrNull(fallback);
+          if (fallbackDetails) {
+            resolved = fallback;
+            details = fallbackDetails;
+          }
+        }
+      }
+      if (!details) {
+        throw new Error(`file not found: ${candidate}`);
+      }
       if (!details.isFile()) {
         throw new Error("path must point to a regular file");
       }

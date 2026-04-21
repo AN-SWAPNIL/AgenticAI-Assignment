@@ -15,6 +15,8 @@ import {
   generateToken,
 } from "./lib";
 
+const DAEMON_RECHECK_DELAY_MS = 35_000;
+
 /**
  * Public API for the control plane. The UI calls only these queries + mutations.
  * All writes that originate from the in-VM daemon go through convex/ingest.ts.
@@ -388,6 +390,11 @@ export const sendMessage = mutation({
     // Old conversations can have stale/missing daemons while still looking "idle" in the UI.
     // Trigger a lightweight revive check on every send so queued runs don't get stuck.
     await ctx.scheduler.runAfter(0, api.orchestrator.reviveDaemonIfDead, {
+      conversationId,
+    });
+    // Edge case: daemon can die right after a fresh heartbeat, making the immediate revive
+    // check return "heartbeat-fresh". Recheck once after the stale-heartbeat window.
+    await ctx.scheduler.runAfter(DAEMON_RECHECK_DELAY_MS, api.orchestrator.reviveDaemonIfDead, {
       conversationId,
     });
 

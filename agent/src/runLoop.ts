@@ -15,7 +15,7 @@ import { safeJson, truncateText } from "./tools/util.js";
  *   4. Builds a fresh pi-agent-core Agent and subscribes to its event stream.
  *   5. Streams text deltas to Convex via DeltaBuffer (150ms debounce).
  *   6. Records each tool start/end as both a row in toolExecutions and a timelineEvent.
- *   7. Retries up to 3× on Gemini 429 rate-limit errors with exponential back-off.
+ *   7. Retries up to 3 times on provider 429 rate-limit errors with exponential back-off.
  *   8. Auto-summarizes older history turns when context exceeds SUMMARY_THRESHOLD.
  *   9. Finalizes the run as completed/error.
  */
@@ -49,6 +49,11 @@ const SUMMARY_THRESHOLD = 20;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [5_000, 10_000, 20_000];
 const RUN_INTERRUPT_POLL_MS = 200;
+const RUN_MAX_WALL_TIME_MS = 240_000;
+const RUN_IDLE_TIMEOUT_MS = 35_000;
+const RUN_PROGRESS_TIMEOUT_MS = 90_000;
+const RUN_TOOL_PROGRESS_TIMEOUT_MS = 180_000;
+const TIMELINE_DELTA_FLUSH_MS = 0;
 
 class RunInterruptedError extends Error {
   constructor(message: string) {
@@ -63,12 +68,14 @@ class RunInterruptedError extends Error {
  */
 type ContentPart =
   | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+  | { type: "image"; data: string; mimeType: string };
 
-export async function processRun(
-  opts: RunLoopOptions,
-  queuedRunId: string,
-): Promise<void> {
+interface PromptImageAttachment {
+  url: string;
+  mimeType?: string;
+}
+
+export async function processRun(opts: RunLoopOptions, queuedRunId: string): Promise<void> {
   const { bridge } = opts;
   let claimedRunToken: string | null = null;
 
@@ -89,294 +96,388 @@ export async function processRun(
       thinkingLevel: claimThinkingLevel,
       userMessageContent,
       attachmentUrls,
+      imageAttachments,
       attachedFiles,
       summaryContext,
     } = claim;
     claimedRunToken = runToken;
     const runId = queuedRunId;
 
-  const messageId = await bridge.mutation(api.ingest.ensureAssistantMessage, {
-    runId,
-    runToken,
-  });
-
-  const sequence = makeSequencer();
-
-  const flushDelta = async (chunk: string) => {
-    await bridge.mutation(api.ingest.appendAssistantDelta, {
+    const messageId = await bridge.mutation(api.ingest.ensureAssistantMessage, {
       runId,
       runToken,
-      messageId,
-      chunk,
     });
-  };
-  const deltaBuffer = new DeltaBuffer(flushDelta);
 
-  const flushThinkingDelta = async (chunk: string) => {
-    await bridge.mutation(api.ingest.appendThinkingDelta, {
-      runId,
-      runToken,
-      messageId,
-      chunk,
-    });
-  };
-  const thinkingDeltaBuffer = new DeltaBuffer(flushThinkingDelta, 0);
+    const sequence = makeSequencer();
 
-  const emitTimeline = (type: string, payload: unknown) => {
-    void bridge
-      .mutation(api.ingest.appendTimelineEvent, {
+    const flushDelta = async (chunk: string) => {
+      await bridge.mutation(api.ingest.appendAssistantDelta, {
         runId,
         runToken,
-        sequence: sequence.next(),
-        type,
-        payloadJson: JSON.stringify(safeJson(payload)),
-      })
-      .catch((err) => {
-        console.error("[agent] timeline event failed:", err);
+        messageId,
+        chunk,
       });
-  };
+    };
+    const deltaBuffer = new DeltaBuffer(flushDelta);
 
-  await emitTimeline("agent_start", {
-    runId,
-    userMessageContent: truncateText(userMessageContent, 4000),
-    attachmentCount: attachmentUrls.length,
-    attachedFileNames: attachedFiles.map((f) => f.name),
-  });
+    const flushThinkingDelta = async (chunk: string) => {
+      await bridge.mutation(api.ingest.appendThinkingDelta, {
+        runId,
+        runToken,
+        messageId,
+        chunk,
+      });
+    };
+    const thinkingDeltaBuffer = new DeltaBuffer(flushThinkingDelta, TIMELINE_DELTA_FLUSH_MS);
 
-  // Download attachments to workspace/uploads/ so bash/read/grep can access them.
-  const downloadedPaths: string[] = [];
-  if (attachmentUrls.length > 0) {
-    try {
-      downloadedPaths.push(
-        ...(await downloadAttachmentsToWorkspace(opts.workspace.root, attachmentUrls)),
-      );
-      emitTimeline("attachments_downloaded", { paths: downloadedPaths });
-    } catch (err) {
-      console.error("[agent] attachment download failed:", err);
-    }
-  }
-
-  // Load conversation history, capped at historyLimit.
-  const historyLimit = opts.historyLimit ?? 30;
-  const allMessages = await bridge.query(api.conversations.messages, {
-    conversationId: bridge.conversationId,
-  });
-  const priorMessages = [...allMessages]
-    .sort((a, b) => a.order - b.order)
-    .filter(
-      (m) =>
-        (m.role === "user" || m.role === "assistant") &&
-        m._id !== userMessageId &&
-        m._id !== messageId &&
-        m.content.length > 0,
-    )
-    .slice(-historyLimit);
-
-  // Auto-summarize: if we have more history than SUMMARY_THRESHOLD, use a rolling summary
-  // for older turns so the context window doesn't blow up on long conversations.
-  let activeSummaryContext = summaryContext;
-  if (priorMessages.length > SUMMARY_THRESHOLD && !summaryContext) {
-    const olderTurns = priorMessages.slice(0, -SUMMARY_THRESHOLD);
-    try {
-      activeSummaryContext = await generateConversationSummary(olderTurns, opts);
-      // Persist so future runs don't re-summarize the same history.
+    const emitTimeline = (type: string, payload: unknown) => {
       void bridge
-        .mutation(api.ingest.saveSummaryContext, {
-          conversationId: bridge.conversationId,
-          agentToken: bridge.agentToken,
-          summary: activeSummaryContext,
+        .mutation(api.ingest.appendTimelineEvent, {
+          runId,
+          runToken,
+          sequence: sequence.next(),
+          type,
+          payloadJson: JSON.stringify(safeJson(payload)),
         })
-        .catch((err) => console.error("[agent] saveSummaryContext failed:", err));
-      emitTimeline("history_summarized", { turnsSummarized: olderTurns.length });
-    } catch (err) {
-      console.error("[agent] auto-summarize failed:", err);
-    }
-  }
+        .catch((err) => {
+          console.error("[agent] timeline event failed:", err);
+        });
+    };
 
-  const recentHistory =
-    priorMessages.length > SUMMARY_THRESHOLD
-      ? priorMessages.slice(-SUMMARY_THRESHOLD)
-      : priorMessages;
+    let pendingTimelineTextDelta = "";
+    let pendingTimelineThinkingDelta = "";
 
-  // activeToolCalls must be created before createAgentSession so the bash onBashChunk
-  // callback can close over it and look up toolExecutionId at execution time.
-  const activeToolCalls = new Map<string, ToolCallTracker>();
-
-  // Use the modelId from the conversation at run-time (supports mid-session model switching).
-  const session = createAgentSession({
-    workspace: opts.workspace,
-    modelId: claimModelId || opts.modelId,
-    openAiApiKey: opts.openAiApiKey,
-    tavilyApiKey: opts.tavilyApiKey,
-    onQueueFileExport: async ({ path, displayName }) =>
-      await bridge.mutation(api.ingest.requestFileExport, {
-        runId,
-        runToken,
-        sequence: sequence.next(),
-        path,
-        displayName,
-      }),
-    onBashChunk: (toolCallId, chunk) => {
-      const tracker = activeToolCalls.get(toolCallId);
-      if (!tracker) return;
-      tracker.streamedOutput = true;
-      void (async () => {
-        try {
-          const toolExecutionId = tracker.toolExecutionId ?? (await tracker.persisted);
-          if (toolExecutionId) {
-            await bridge.mutation(api.ingest.appendToolOutput, {
-              toolExecutionId,
-              runToken,
-              chunk,
-            });
-          }
-        } catch {
-          // Telemetry failure — never crash the tool
-        }
-      })();
-    },
-    thinkingLevel:
-      (claimThinkingLevel as "off" | "minimal" | "low" | "medium" | "high" | undefined) ??
-      opts.thinkingLevel,
-  });
-
-  // Prepend attached file context so the agent sees it before the user request.
-  // Files are already copied to the sandbox by processUploadToSandbox.
-  const fileContextNote =
-    attachedFiles.length > 0
-      ? `[User attached ${attachedFiles.length} file(s) — copied to sandbox uploads/ dir]\n` +
-        attachedFiles
-          .map((f) => {
-            const pathPart = f.sandboxPath ? ` → ${f.sandboxPath}` : "";
-            const statusPart = f.status !== "ready" ? ` [still transferring — wait a moment then ls]` : "";
-            return `• ${f.name} (${f.contentType})${pathPart}${statusPart}`;
-          })
-          .join("\n") +
-        "\n\n"
-      : "";
-  const enrichedContent = fileContextNote + userMessageContent;
-
-  // Build multimodal prompt: text + image URLs (if any).
-  const promptInput: string | ContentPart[] =
-    attachmentUrls.length > 0
-      ? [
-          { type: "text", text: enrichedContent },
-          ...attachmentUrls.map((url) => ({
-            type: "image_url" as const,
-            image_url: { url },
-          })),
-        ]
-      : buildPromptWithHistory(recentHistory, enrichedContent, activeSummaryContext);
-
-  // For multimodal prompts, prepend history as a leading text part.
-  const finalPromptInput = Array.isArray(promptInput)
-    ? [
-        { type: "text" as const, text: buildHistoryPreamble(recentHistory, activeSummaryContext) },
-        ...promptInput,
-      ]
-    : promptInput;
-
-  const runtimeState: {
-    assistantTextFromEvents: string;
-    thinkingContent: string;
-    eventError?: string;
-  } = {
-    assistantTextFromEvents: "",
-    thinkingContent: "",
-    eventError: undefined,
-  };
-
-  const unsubscribe = session.agent.subscribe((event) => {
-    handleAgentEvent(event, {
-      bridge,
-      runId,
-      runToken: runToken,
-      deltaBuffer,
-      thinkingDeltaBuffer,
-      activeToolCalls,
-      sequence,
-      emitTimeline,
-      runtimeState,
-    });
-  });
-
-  let promptError: string | undefined;
-  try {
-    // Retry on 429 rate-limit with exponential back-off.
-    let attempt = 0;
-    while (true) {
-      const stopWatcher = createRunStopWatcher({
-        bridge,
-        runId,
-        pollMs: RUN_INTERRUPT_POLL_MS,
+    const flushPendingTimelineTextDelta = () => {
+      if (!pendingTimelineTextDelta) return;
+      const chunk = pendingTimelineTextDelta;
+      pendingTimelineTextDelta = "";
+      emitTimeline("message_update", {
+        assistantMessageEvent: { type: "text_delta", delta: chunk },
       });
+    };
 
+    const flushPendingTimelineThinkingDelta = () => {
+      if (!pendingTimelineThinkingDelta) return;
+      const chunk = pendingTimelineThinkingDelta;
+      pendingTimelineThinkingDelta = "";
+      emitTimeline("message_update", {
+        assistantMessageEvent: { type: "thinking_delta", delta: chunk },
+      });
+    };
+
+    const flushPendingTimelineDeltas = () => {
+      flushPendingTimelineTextDelta();
+      flushPendingTimelineThinkingDelta();
+    };
+
+    const pushTimelineTextDelta = (delta: string) => {
+      pendingTimelineTextDelta += delta;
+      if (shouldFlushTimelineDelta(pendingTimelineTextDelta, delta)) {
+        flushPendingTimelineTextDelta();
+      }
+    };
+
+    const pushTimelineThinkingDelta = (delta: string) => {
+      pendingTimelineThinkingDelta += delta;
+      if (shouldFlushTimelineDelta(pendingTimelineThinkingDelta, delta)) {
+        flushPendingTimelineThinkingDelta();
+      }
+    };
+
+    await emitTimeline("agent_start", {
+      runId,
+      userMessageContent: truncateText(userMessageContent, 4000),
+      attachmentCount: attachmentUrls.length,
+      attachedFileNames: attachedFiles.map((f) => f.name),
+    });
+
+    // Download attachments to workspace/uploads/ so bash/read/grep can access them.
+    const downloadedPaths: string[] = [];
+    if (attachmentUrls.length > 0) {
       try {
-        const attemptPromise = Array.isArray(finalPromptInput)
-          ? session.agent.prompt({
-              role: "user",
-              content: finalPromptInput,
-              timestamp: Date.now(),
-            } as any)
-          : session.agent.prompt(finalPromptInput as string);
-        void attemptPromise.catch(() => undefined);
-
-        await Promise.race([attemptPromise, stopWatcher.promise]);
-        break;
+        downloadedPaths.push(
+          ...(await downloadAttachmentsToWorkspace(opts.workspace.root, attachmentUrls)),
+        );
+        emitTimeline("attachments_downloaded", { paths: downloadedPaths });
       } catch (err) {
-        if (err instanceof RunInterruptedError) {
-          throw err;
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        const isRateLimit = /RESOURCE_EXHAUSTED|429|rate.?limit|quota.?exceeded/i.test(msg);
-        if (isRateLimit && attempt < MAX_RETRIES) {
-          const delay = RETRY_DELAYS_MS[attempt] ?? 20_000;
-          emitTimeline("agent_retry", { attempt: attempt + 1, delayMs: delay, reason: "rate_limit" });
-          await new Promise((r) => setTimeout(r, delay));
-          attempt += 1;
-          continue;
-        }
-        throw err;
-      } finally {
-        stopWatcher.cancel();
+        console.error("[agent] attachment download failed:", err);
       }
     }
-  } catch (err) {
-    promptError = err instanceof Error ? err.message : String(err);
-  } finally {
-    unsubscribe?.();
-    await deltaBuffer.flush();
-    await thinkingDeltaBuffer.flush();
-  }
 
-  const assistantResult = extractFinalAssistantResult(session.agent.state.messages);
-  const finalAssistantText =
-    assistantResult.text || runtimeState.assistantTextFromEvents;
-  if (finalAssistantText.length > 0) {
-    await bridge.mutation(api.ingest.syncAssistantMessageContent, {
-      runId,
-      runToken,
-      messageId,
-      content: finalAssistantText,
+    // Load conversation history, capped at historyLimit.
+    const historyLimit = opts.historyLimit ?? 30;
+    const allMessages = await bridge.query(api.conversations.messages, {
+      conversationId: bridge.conversationId,
     });
-  }
+    const priorMessages = [...allMessages]
+      .sort((a, b) => a.order - b.order)
+      .filter(
+        (m) =>
+          (m.role === "user" || m.role === "assistant") &&
+          m._id !== userMessageId &&
+          m._id !== messageId &&
+          m.content.length > 0,
+      )
+      .slice(-historyLimit);
 
-  // Persist thinking content if any was produced
-  if (runtimeState.thinkingContent.length > 0) {
-    await bridge.mutation(api.ingest.syncThinkingContent, {
-      runId,
-      runToken,
-      messageId,
-      thinkingContent: runtimeState.thinkingContent,
-    }).catch((err) => console.error("[agent] syncThinkingContent failed:", err));
-  }
+    // Auto-summarize: if we have more history than SUMMARY_THRESHOLD, use a rolling summary
+    // for older turns so the context window doesn't blow up on long conversations.
+    let activeSummaryContext = summaryContext;
+    if (priorMessages.length > SUMMARY_THRESHOLD && !summaryContext) {
+      const olderTurns = priorMessages.slice(0, -SUMMARY_THRESHOLD);
+      try {
+        activeSummaryContext = await generateConversationSummary(olderTurns, opts);
+        // Persist so future runs don't re-summarize the same history.
+        void bridge
+          .mutation(api.ingest.saveSummaryContext, {
+            conversationId: bridge.conversationId,
+            agentToken: bridge.agentToken,
+            summary: activeSummaryContext,
+          })
+          .catch((err) => console.error("[agent] saveSummaryContext failed:", err));
+        emitTimeline("history_summarized", { turnsSummarized: olderTurns.length });
+      } catch (err) {
+        console.error("[agent] auto-summarize failed:", err);
+      }
+    }
 
-  const finalError = promptError ?? assistantResult.error ?? runtimeState.eventError;
-  if (finalError) {
-    await emitTimeline("agent_error", { error: finalError });
-  } else {
-    await emitTimeline("agent_complete", {});
-  }
+    const recentHistory =
+      priorMessages.length > SUMMARY_THRESHOLD
+        ? priorMessages.slice(-SUMMARY_THRESHOLD)
+        : priorMessages;
+
+    // activeToolCalls must be created before createAgentSession so the bash onBashChunk
+    // callback can close over it and look up toolExecutionId at execution time.
+    const activeToolCalls = new Map<string, ToolCallTracker>();
+    const runStartedAt = Date.now();
+
+    // Use the modelId from the conversation at run-time (supports mid-session model switching).
+    const session = createAgentSession({
+      workspace: opts.workspace,
+      modelId: claimModelId || opts.modelId,
+      openAiApiKey: opts.openAiApiKey,
+      tavilyApiKey: opts.tavilyApiKey,
+      onQueueFileExport: async ({ path, displayName }) =>
+        await bridge.mutation(api.ingest.requestFileExport, {
+          runId,
+          runToken,
+          sequence: sequence.next(),
+          path,
+          displayName,
+        }),
+      onBashChunk: (toolCallId, chunk) => {
+        const tracker = activeToolCalls.get(toolCallId);
+        if (!tracker) return;
+        tracker.streamedOutput = true;
+        void (async () => {
+          try {
+            const toolExecutionId = tracker.toolExecutionId ?? (await tracker.persisted);
+            if (toolExecutionId) {
+              await bridge.mutation(api.ingest.appendToolOutput, {
+                toolExecutionId,
+                runToken,
+                chunk,
+              });
+            }
+          } catch {
+            // Telemetry failure — never crash the tool
+          }
+        })();
+      },
+      thinkingLevel:
+        (claimThinkingLevel as "off" | "minimal" | "low" | "medium" | "high" | undefined) ??
+        opts.thinkingLevel,
+    });
+
+    // Prepend attached file context so the agent sees it before the user request.
+    // Files are already copied to the sandbox by processUploadToSandbox.
+    const fileContextNote =
+      attachedFiles.length > 0
+        ? `[User attached ${attachedFiles.length} file(s) — copied to sandbox uploads/ dir]\n` +
+          attachedFiles
+            .map((f) => {
+              const pathPart = f.sandboxPath ? ` → ${f.sandboxPath}` : "";
+              const statusPart =
+                f.status !== "ready" ? ` [still transferring — wait a moment then ls]` : "";
+              return `• ${f.name} (${f.contentType})${pathPart}${statusPart}`;
+            })
+            .join("\n") +
+          "\n\n"
+        : "";
+    const enrichedContent = fileContextNote + userMessageContent;
+
+    // Build multimodal prompt: text + inline base64 images (if any).
+    const imageInputs =
+      imageAttachments.length > 0
+        ? await buildVisionInputsFromAttachments(imageAttachments)
+        : attachmentUrls.length > 0
+          ? await buildVisionInputsFromAttachments(attachmentUrls.map((url) => ({ url })))
+          : [];
+    if ((imageAttachments.length > 0 || attachmentUrls.length > 0) && imageInputs.length === 0) {
+      emitTimeline("image_attachments_unavailable", {
+        requested: imageAttachments.length || attachmentUrls.length,
+        resolved: 0,
+      });
+    }
+    const promptInput: string | ContentPart[] =
+      imageInputs.length > 0
+        ? [{ type: "text", text: enrichedContent }, ...imageInputs]
+        : buildPromptWithHistory(recentHistory, enrichedContent, activeSummaryContext);
+
+    // For multimodal prompts, prepend history as a leading text part.
+    const finalPromptInput = Array.isArray(promptInput)
+      ? [
+          {
+            type: "text" as const,
+            text: buildHistoryPreamble(recentHistory, activeSummaryContext),
+          },
+          ...promptInput,
+        ]
+      : promptInput;
+
+    const runtimeState: {
+      assistantTextFromEvents: string;
+      thinkingContent: string;
+      lastActivityAt: number;
+      lastProgressAt: number;
+      sawAssistantMessageStart: boolean;
+      sawTextDelta: boolean;
+      sawToolExecution: boolean;
+      eventError?: string;
+    } = {
+      assistantTextFromEvents: "",
+      thinkingContent: "",
+      lastActivityAt: Date.now(),
+      lastProgressAt: Date.now(),
+      sawAssistantMessageStart: false,
+      sawTextDelta: false,
+      sawToolExecution: false,
+      eventError: undefined,
+    };
+
+    const unsubscribe = session.agent.subscribe((event) => {
+      handleAgentEvent(event, {
+        bridge,
+        runId,
+        runToken: runToken,
+        deltaBuffer,
+        thinkingDeltaBuffer,
+        pushTimelineTextDelta,
+        pushTimelineThinkingDelta,
+        flushPendingTimelineDeltas,
+        activeToolCalls,
+        sequence,
+        emitTimeline,
+        runtimeState,
+      });
+    });
+
+    let promptError: string | undefined;
+    try {
+      // Retry on 429 rate-limit with exponential back-off.
+      let attempt = 0;
+      while (true) {
+        const stopWatcher = createRunStopWatcher({
+          bridge,
+          runId,
+          pollMs: RUN_INTERRUPT_POLL_MS,
+          runStartedAt,
+          maxWallTimeMs: RUN_MAX_WALL_TIME_MS,
+          idleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
+          progressTimeoutMs: RUN_PROGRESS_TIMEOUT_MS,
+          toolProgressTimeoutMs: RUN_TOOL_PROGRESS_TIMEOUT_MS,
+          getLastActivityAt: () => runtimeState.lastActivityAt,
+          getLastProgressAt: () => runtimeState.lastProgressAt,
+          hasActiveToolCalls: () => activeToolCalls.size > 0,
+        });
+
+        try {
+          const attemptPromise = Array.isArray(finalPromptInput)
+            ? session.agent.prompt({
+                role: "user",
+                content: finalPromptInput,
+                timestamp: Date.now(),
+              } as any)
+            : session.agent.prompt(finalPromptInput as string);
+          void attemptPromise.catch(() => undefined);
+
+          await Promise.race([attemptPromise, stopWatcher.promise]);
+          break;
+        } catch (err) {
+          if (err instanceof RunInterruptedError) {
+            try {
+              session.agent.abort();
+            } catch {
+              // Best-effort only; interruption has already been detected.
+            }
+            throw err;
+          }
+          const msg = err instanceof Error ? err.message : String(err);
+          const isRateLimit = /RESOURCE_EXHAUSTED|429|rate.?limit|quota.?exceeded/i.test(msg);
+          if (isRateLimit && attempt < MAX_RETRIES) {
+            const delay = RETRY_DELAYS_MS[attempt] ?? 20_000;
+            emitTimeline("agent_retry", {
+              attempt: attempt + 1,
+              delayMs: delay,
+              reason: "rate_limit",
+            });
+            await new Promise((r) => setTimeout(r, delay));
+            attempt += 1;
+            continue;
+          }
+          throw err;
+        } finally {
+          stopWatcher.cancel();
+        }
+      }
+    } catch (err) {
+      promptError = err instanceof Error ? err.message : String(err);
+    } finally {
+      unsubscribe?.();
+      flushPendingTimelineDeltas();
+      await deltaBuffer.flush();
+      await thinkingDeltaBuffer.flush();
+    }
+
+    const assistantResult = extractFinalAssistantResult(session.agent.state.messages);
+    const finalAssistantText = assistantResult.text || runtimeState.assistantTextFromEvents;
+    if (finalAssistantText.length > 0) {
+      await bridge.mutation(api.ingest.syncAssistantMessageContent, {
+        runId,
+        runToken,
+        messageId,
+        content: finalAssistantText,
+      });
+    }
+
+    // Persist thinking content if any was produced
+    if (runtimeState.thinkingContent.length > 0) {
+      await bridge
+        .mutation(api.ingest.syncThinkingContent, {
+          runId,
+          runToken,
+          messageId,
+          thinkingContent: runtimeState.thinkingContent,
+        })
+        .catch((err) => console.error("[agent] syncThinkingContent failed:", err));
+    }
+
+    let finalError = promptError ?? assistantResult.error ?? runtimeState.eventError;
+    if (
+      !finalError &&
+      finalAssistantText.trim().length === 0 &&
+      runtimeState.sawAssistantMessageStart &&
+      !runtimeState.sawTextDelta &&
+      !runtimeState.sawToolExecution
+    ) {
+      finalError =
+        "Assistant returned an empty response after starting generation. Please retry the request.";
+    }
+    if (finalError) {
+      await emitTimeline("agent_error", { error: finalError });
+    } else {
+      await emitTimeline("agent_complete", {});
+    }
 
     await bridge.mutation(api.ingest.finalizeRun, {
       runId,
@@ -406,6 +507,14 @@ function createRunStopWatcher(opts: {
   bridge: ConvexBridge;
   runId: string;
   pollMs: number;
+  runStartedAt: number;
+  maxWallTimeMs: number;
+  idleTimeoutMs: number;
+  progressTimeoutMs: number;
+  toolProgressTimeoutMs: number;
+  getLastActivityAt: () => number;
+  getLastProgressAt: () => number;
+  hasActiveToolCalls: () => boolean;
 }): { promise: Promise<void>; cancel: () => void } {
   let cancelled = false;
 
@@ -413,6 +522,29 @@ function createRunStopWatcher(opts: {
     while (!cancelled) {
       await new Promise((resolve) => setTimeout(resolve, opts.pollMs));
       if (cancelled) return;
+
+      const now = Date.now();
+      if (now - opts.runStartedAt > opts.maxWallTimeMs) {
+        throw new RunInterruptedError(
+          `Agent reached max runtime (${Math.round(opts.maxWallTimeMs / 1000)}s).`,
+        );
+      }
+      if (!opts.hasActiveToolCalls() && now - opts.getLastActivityAt() > opts.idleTimeoutMs) {
+        throw new RunInterruptedError(
+          `Agent stalled (no activity for ${Math.round(opts.idleTimeoutMs / 1000)}s).`,
+        );
+      }
+      const progressAge = now - opts.getLastProgressAt();
+      if (!opts.hasActiveToolCalls() && progressAge > opts.progressTimeoutMs) {
+        throw new RunInterruptedError(
+          `Agent stalled (no meaningful progress for ${Math.round(opts.progressTimeoutMs / 1000)}s).`,
+        );
+      }
+      if (opts.hasActiveToolCalls() && progressAge > opts.toolProgressTimeoutMs) {
+        throw new RunInterruptedError(
+          `Tool execution stalled (no progress for ${Math.round(opts.toolProgressTimeoutMs / 1000)}s).`,
+        );
+      }
 
       try {
         const run = await opts.bridge.query(api.conversations.runById, {
@@ -441,6 +573,82 @@ function createRunStopWatcher(opts: {
 }
 
 // ─── attachment download ─────────────────────────────────────────────────────
+
+async function buildVisionInputsFromAttachments(
+  attachments: PromptImageAttachment[],
+): Promise<ContentPart[]> {
+  const images: ContentPart[] = [];
+
+  for (const attachment of attachments) {
+    const url = attachment.url;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) {
+        console.warn(`[agent] image fetch failed (${response.status}): ${url}`);
+        continue;
+      }
+
+      const mimeType =
+        normalizeImageMimeType(attachment.mimeType) ??
+        resolveImageMimeType(response.headers.get("content-type"), url);
+      if (!mimeType) {
+        console.warn(`[agent] skipped non-image attachment: ${url}`);
+        continue;
+      }
+
+      const bytes = await response.arrayBuffer();
+      if (bytes.byteLength === 0) {
+        continue;
+      }
+
+      images.push({
+        type: "image",
+        data: Buffer.from(bytes).toString("base64"),
+        mimeType,
+      });
+    } catch (err) {
+      console.warn("[agent] image fetch error:", err);
+    }
+  }
+
+  return images;
+}
+
+function normalizeImageMimeType(value: string | undefined): string | null {
+  if (!value) return null;
+  const [raw = ""] = value.split(";");
+  const mimeType = raw.trim().toLowerCase();
+  if (!mimeType.startsWith("image/")) return null;
+  return mimeType;
+}
+
+function resolveImageMimeType(contentTypeHeader: string | null, sourceUrl: string): string | null {
+  const [rawHeader = ""] = (contentTypeHeader ?? "").split(";");
+  const fromHeader = rawHeader.trim().toLowerCase();
+  if (fromHeader.startsWith("image/")) {
+    return fromHeader;
+  }
+
+  const pathname = (() => {
+    try {
+      return new URL(sourceUrl).pathname.toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
+
+  if (pathname.endsWith(".png")) return "image/png";
+  if (pathname.endsWith(".jpg") || pathname.endsWith(".jpeg")) return "image/jpeg";
+  if (pathname.endsWith(".webp")) return "image/webp";
+  if (pathname.endsWith(".gif")) return "image/gif";
+  if (pathname.endsWith(".bmp")) return "image/bmp";
+  if (pathname.endsWith(".tif") || pathname.endsWith(".tiff")) return "image/tiff";
+  if (pathname.endsWith(".svg")) return "image/svg+xml";
+  if (pathname.endsWith(".heic")) return "image/heic";
+  if (pathname.endsWith(".heif")) return "image/heif";
+  if (pathname.endsWith(".avif")) return "image/avif";
+  return null;
+}
 
 async function downloadAttachmentsToWorkspace(
   workspaceRoot: string,
@@ -496,9 +704,7 @@ async function generateConversationSummary(
     tavilyApiKey: opts.tavilyApiKey,
   });
 
-  const historyText = turns
-    .map((t) => `${t.role.toUpperCase()}: ${t.content}`)
-    .join("\n\n");
+  const historyText = turns.map((t) => `${t.role.toUpperCase()}: ${t.content}`).join("\n\n");
 
   const summaryPrompt = [
     "Summarize the following conversation history in 2-4 sentences. Capture the key topics discussed, any decisions made, and any files or code produced. Be factual and concise — this summary will be injected as context for future turns.",
@@ -508,7 +714,10 @@ async function generateConversationSummary(
 
   let summary = "";
   const unsub = summarySession.agent.subscribe((event) => {
-    const ev = event as { type?: string; assistantMessageEvent?: { type?: string; delta?: string } };
+    const ev = event as {
+      type?: string;
+      assistantMessageEvent?: { type?: string; delta?: string };
+    };
     if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta") {
       summary += ev.assistantMessageEvent.delta ?? "";
     }
@@ -531,12 +740,20 @@ interface EventHandlerCtx {
   runToken: string;
   deltaBuffer: DeltaBuffer;
   thinkingDeltaBuffer: DeltaBuffer;
+  pushTimelineTextDelta: (delta: string) => void;
+  pushTimelineThinkingDelta: (delta: string) => void;
+  flushPendingTimelineDeltas: () => void;
   activeToolCalls: Map<string, ToolCallTracker>;
   sequence: { next: () => number };
   emitTimeline: (type: string, payload: unknown) => void;
   runtimeState: {
     assistantTextFromEvents: string;
     thinkingContent: string;
+    lastActivityAt: number;
+    lastProgressAt: number;
+    sawAssistantMessageStart: boolean;
+    sawTextDelta: boolean;
+    sawToolExecution: boolean;
     eventError?: string;
   };
 }
@@ -544,8 +761,11 @@ interface EventHandlerCtx {
 function handleAgentEvent(event: unknown, ctx: EventHandlerCtx): void {
   if (!event || typeof event !== "object") return;
   const ev = event as { type?: string; [k: string]: unknown };
-
-  ctx.emitTimeline(String(ev.type ?? "unknown"), event);
+  const eventType = String(ev.type ?? "unknown");
+  ctx.runtimeState.lastActivityAt = Date.now();
+  const markProgress = () => {
+    ctx.runtimeState.lastProgressAt = Date.now();
+  };
 
   if (ev.type === "message_update") {
     const inner = (ev as { assistantMessageEvent?: unknown }).assistantMessageEvent;
@@ -553,19 +773,46 @@ function handleAgentEvent(event: unknown, ctx: EventHandlerCtx): void {
       const innerEv = inner as { type?: string; delta?: unknown; errorMessage?: unknown };
       if (innerEv.type === "text_delta" && typeof innerEv.delta === "string") {
         ctx.deltaBuffer.push(innerEv.delta);
+        ctx.pushTimelineTextDelta(innerEv.delta);
+        ctx.runtimeState.sawTextDelta = true;
+        markProgress();
+        return;
       }
       if (innerEv.type === "thinking_delta" && typeof innerEv.delta === "string") {
         ctx.runtimeState.thinkingContent += innerEv.delta;
         ctx.thinkingDeltaBuffer.push(innerEv.delta);
+        ctx.pushTimelineThinkingDelta(innerEv.delta);
+        return;
       }
       if (innerEv.type === "error" && typeof innerEv.errorMessage === "string") {
         ctx.runtimeState.eventError = normalizeAgentError(innerEv.errorMessage);
+        markProgress();
+        ctx.flushPendingTimelineDeltas();
+        ctx.emitTimeline(eventType, event);
+        return;
+      }
+    }
+    ctx.flushPendingTimelineDeltas();
+    ctx.emitTimeline(eventType, event);
+    return;
+  }
+
+  ctx.flushPendingTimelineDeltas();
+  ctx.emitTimeline(eventType, event);
+
+  if (ev.type === "message_start") {
+    const message = (ev as { message?: unknown }).message;
+    if (message && typeof message === "object") {
+      const role = (message as { role?: unknown }).role;
+      if (role === "assistant") {
+        ctx.runtimeState.sawAssistantMessageStart = true;
       }
     }
     return;
   }
 
   if (ev.type === "message_end") {
+    markProgress();
     const message = (ev as { message?: unknown }).message;
     if (message && typeof message === "object") {
       const assistant = message as {
@@ -592,6 +839,8 @@ function handleAgentEvent(event: unknown, ctx: EventHandlerCtx): void {
   }
 
   if (ev.type === "tool_execution_start") {
+    markProgress();
+    ctx.runtimeState.sawToolExecution = true;
     const toolCallId = String(ev.toolCallId ?? "");
     const toolName = String(ev.toolName ?? "unknown");
     const inputJson = JSON.stringify(safeJson(ev.args));
@@ -618,13 +867,18 @@ function handleAgentEvent(event: unknown, ctx: EventHandlerCtx): void {
         return toolExecutionId;
       });
     ctx.activeToolCalls.set(toolCallId, tracker);
-    void tracker.persisted.catch((err) =>
-      console.error("[agent] startToolExecution failed:", err),
-    );
+    void tracker.persisted.catch((err) => console.error("[agent] startToolExecution failed:", err));
+    return;
+  }
+
+  if (ev.type === "tool_execution_update") {
+    markProgress();
     return;
   }
 
   if (ev.type === "tool_execution_end") {
+    markProgress();
+    ctx.runtimeState.sawToolExecution = true;
     const toolCallId = String(ev.toolCallId ?? "");
     const isError = Boolean((ev as { isError?: unknown }).isError);
     const result = (ev as { result?: unknown }).result;
@@ -665,6 +919,10 @@ function handleAgentEvent(event: unknown, ctx: EventHandlerCtx): void {
     ctx.activeToolCalls.delete(toolCallId);
     return;
   }
+
+  if (ev.type === "turn_end" || ev.type === "agent_end") {
+    markProgress();
+  }
 }
 
 // ─── prompt helpers ──────────────────────────────────────────────────────────
@@ -679,7 +937,9 @@ function buildHistoryPreamble(
   }
   if (history.length > 0) {
     parts.push("Conversation history:");
-    parts.push(...history.map((m) => `${m.role === "assistant" ? "ASSISTANT" : "USER"}: ${m.content}`));
+    parts.push(
+      ...history.map((m) => `${m.role === "assistant" ? "ASSISTANT" : "USER"}: ${m.content}`),
+    );
   }
   return parts.join("\n\n");
 }
@@ -695,7 +955,9 @@ function buildPromptWithHistory(
   }
   if (history.length > 0) {
     parts.push("Conversation history:");
-    parts.push(...history.map((m) => `${m.role === "assistant" ? "ASSISTANT" : "USER"}: ${m.content}`));
+    parts.push(
+      ...history.map((m) => `${m.role === "assistant" ? "ASSISTANT" : "USER"}: ${m.content}`),
+    );
     parts.push("");
   }
   parts.push("Current user message:");
@@ -705,7 +967,12 @@ function buildPromptWithHistory(
 
 function makeSequencer(): { next: () => number } {
   let n = 0;
-  return { next: () => { n += 1; return n; } };
+  return {
+    next: () => {
+      n += 1;
+      return n;
+    },
+  };
 }
 
 function extractFinalAssistantResult(messages: unknown): { text: string; error?: string } {
@@ -755,11 +1022,17 @@ function normalizeAgentError(raw: string): string {
       /retry in ([0-9.]+s)/i.exec(flat) ?? /"retryDelay"\s*:\s*"([^"]+)"/i.exec(flat);
     const retrySuffix = retryMatch?.[1] ? ` Retry after ${retryMatch[1]}.` : "";
     return (
-      "Gemini API rate/quota limit reached (429 RESOURCE_EXHAUSTED)." +
+      "Model provider rate/quota limit reached (HTTP 429)." +
       retrySuffix +
-      " Check AI Studio rate limits or enable billing."
+      " Check provider rate limits or billing."
     );
   }
 
   return text;
+}
+
+function shouldFlushTimelineDelta(buffer: string, latestDelta: string): boolean {
+  if (buffer.length >= 180) return true;
+  if (latestDelta.includes("\n")) return true;
+  return /[.!?]\s*$/.test(latestDelta) && buffer.length >= 40;
 }
